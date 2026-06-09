@@ -1564,15 +1564,15 @@ function renderSizes() {
   const sizeData = { S: computeCost('S'), A: computeCost('A'), B: computeCost('B') };
   const fmtCost = (n) => n > 0 ? Math.round(n).toLocaleString('ko-KR') + '원' : '미산정';
 
-  const card = (tier, sizeName, bgColor, textColor) => {
+  const card = (tier, sizeName, bgColor, textColor, valueColor) => {
     const d = sizeData[tier];
     return `
       <div class="rounded-lg p-3 cursor-pointer hover:opacity-80 transition"
            style="background:${bgColor};"
            onclick="showSizeCostModal('${tier}')">
-        <div class="text-xs ${textColor}">${sizeName} 캠핑장 (${d.count}종)</div>
-        <div class="text-xl font-bold mt-1" style="color:${textColor.replace('text-','').replace('-800','').replace('-200','')};">${fmtCost(d.sum)}</div>
-        <div class="text-xs mt-1 ${textColor}">
+        <div class="text-xs" style="color:${textColor};">${sizeName} 캠핑장 (${d.count}종)</div>
+        <div class="text-xl font-bold mt-1" style="color:${valueColor};">${fmtCost(d.sum)}</div>
+        <div class="text-xs mt-1" style="color:${textColor};">
           견적 수령 ${d.received}종${d.missing > 0 ? ` · <span class="font-semibold">미수령 ${d.missing}종 제외</span>` : ''}
         </div>
         <div class="text-xs text-gray-500 mt-2">▶ 클릭하면 상세 보기</div>
@@ -1587,9 +1587,9 @@ function renderSizes() {
       <h3 class="font-bold text-gray-900 mb-2">캠핑장 사이즈별 초기 사입 비용</h3>
       <p class="text-xs text-gray-500 mb-3">각 사이즈 캠핑장에서 SKU를 한 박스씩 매입 시 예상 비용 (견적 미수령 SKU는 합산 제외)</p>
       <div class="grid grid-cols-3 gap-3">
-        ${card('S', 'S 대형', '#ffccbc', 'text-orange-800')}
-        ${card('A', 'A 중형', '#fff9c4', 'text-yellow-800')}
-        ${card('B', 'B 소형', '#c8e6c9', 'text-green-800')}
+        ${card('S', 'S 대형', '#ffccbc', '#bf360c', '#bf360c')}
+        ${card('A', 'A 중형', '#fff9c4', '#827717', '#5d4037')}
+        ${card('B', 'B 소형', '#c8e6c9', '#1b5e20', '#1b5e20')}
       </div>
     </section>
 

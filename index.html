@@ -29,6 +29,42 @@
   .tag-good { color: #1565c0; font-weight: 600; }
   .tag-bad { color: #c62828; font-weight: 600; }
   .tag-neutral { color: #757575; }
+  .core-star { color: #e53935; font-weight: bold; margin-right: 4px; font-size: 14px; }
+  /* 로딩 오버레이 */
+  #loadingOverlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(4px);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    transition: opacity 0.4s ease;
+  }
+  #loadingOverlay.hidden { opacity: 0; pointer-events: none; }
+  .loader-spinner {
+    width: 56px; height: 56px;
+    border: 5px solid #e5e7eb;
+    border-top-color: #1f6d4a;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loader-title { font-size: 18px; font-weight: 700; color: #1f6d4a; margin-top: 20px; }
+  .loader-sub { font-size: 13px; color: #6b7280; margin-top: 6px; }
+  .loader-progress {
+    margin-top: 16px;
+    width: 240px; height: 4px;
+    background: #e5e7eb; border-radius: 2px; overflow: hidden;
+  }
+  .loader-bar {
+    height: 100%;
+    background: #1f6d4a;
+    animation: progress 1.4s ease-in-out infinite;
+  }
+  @keyframes progress {
+    0% { width: 0%; margin-left: 0; }
+    50% { width: 60%; margin-left: 20%; }
+    100% { width: 0%; margin-left: 100%; }
+  }
   /* 비교 컬럼 그룹 색상 */
   .grp-camp, .grp-camp th { background: #e3f2fd !important; }      /* 파랑 — 캠지기 납품 */
   .grp-online, .grp-online th { background: #fff3e0 !important; }  /* 주황 — 온라인 */
@@ -36,6 +72,24 @@
   table.compare tr:hover td.grp-camp { background: #d6e9fa !important; }
   table.compare tr:hover td.grp-online { background: #ffe7c4 !important; }
   table.compare tr:hover td.grp-offline { background: #fbcfdc !important; }
+  /* 클릭 가능 행 */
+  table.compare tbody tr { cursor: pointer; }
+  /* 모달 */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+    padding: 20px;
+  }
+  .modal-box {
+    background: white; border-radius: 16px; max-width: 720px; width: 100%;
+    max-height: 90vh; overflow-y: auto; padding: 28px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+  }
+  .modal-close {
+    position: absolute; top: 16px; right: 20px; font-size: 28px;
+    color: #999; cursor: pointer; background: none; border: none;
+  }
+  .modal-close:hover { color: #333; }
 </style>
 </head>
 <body class="min-h-screen">
@@ -54,6 +108,17 @@
     <div class="text-xs text-gray-500" id="updatedAt">데이터 로드 중...</div>
   </div>
 </header>
+
+<!-- 로딩 오버레이 -->
+<div id="loadingOverlay">
+  <div class="loader-spinner"></div>
+  <div class="loader-title">데이터를 불러오는 중입니다</div>
+  <div class="loader-sub">구글 스프레드시트에서 SKU 데이터를 가져오고 있어요 (보통 2~5초)</div>
+  <div class="loader-progress"><div class="loader-bar"></div></div>
+</div>
+
+<!-- 상품 상세 모달 -->
+<div id="skuModal" class="hidden"></div>
 
 <div class="flex">
   <!-- 사이드바 -->
@@ -77,6 +142,9 @@
       <div class="nav-item" data-section="sizes">
         <span class="text-lg">🏕</span><span>캠핑장 사이즈별 SKU</span>
       </div>
+      <div class="nav-item" data-section="simulation">
+        <span class="text-lg">📈</span><span>시뮬레이션</span>
+      </div>
     </nav>
     <div class="mt-6 pt-4 border-t border-gray-200 text-xs text-gray-400">
       <div>마진율 (현재 적용)</div>
@@ -94,6 +162,7 @@
 let allSkus = [];
 let allCounts = {};
 let allMargins = {};
+let allMarginLabels = {};
 let allVendors = [];
 let currentSection = 'dashboard';
 let currentTier = 'S';   // 기본 = 대형(전체)
@@ -109,7 +178,8 @@ const SECTION_LABELS = {
   supply: '캠핑장 납품 분석',
   online: '온라인 판매가 분석',
   offline: '오프라인 판매가 분석',
-  sizes: '캠핑장 사이즈별 SKU'
+  sizes: '캠핑장 사이즈별 SKU',
+  simulation: '시뮬레이션'
 };
 
 window.showImgFail = function(container, emoji) {
@@ -126,32 +196,42 @@ function fmtPct(n, digits=1) {
   return (n*100).toFixed(digits) + '%';
 }
 
-// 비교 결과를 명확한 한국어로
+// 비교 결과 (정액원 + %)
 function compareLabel(myValue, theirValue, myLabel, theirLabel) {
   if (myValue == null || theirValue == null || theirValue === 0) {
     return { html: `<span class="tag-neutral">비교불가</span>`, raw: null };
   }
-  const diff = (myValue - theirValue) / theirValue;
-  const absPct = Math.abs(diff*100).toFixed(1);
-  if (Math.abs(diff) < 0.005) {
-    return { html: `<span class="tag-neutral">${theirLabel} 대비 동일</span>`, raw: diff };
+  const diffWon = Math.round(myValue - theirValue);
+  const pct = ((myValue - theirValue) / theirValue);
+  const absWon = Math.abs(diffWon).toLocaleString('ko-KR');
+  const absPct = Math.abs(pct*100).toFixed(1);
+  if (diffWon === 0) {
+    return { html: `<span class="tag-neutral">${theirLabel} 대비 동일</span>`, raw: 0 };
   }
-  if (diff > 0) {
+  if (diffWon > 0) {
     return {
-      html: `<span class="tag-bad">${theirLabel} 대비 ${myLabel} ${absPct}% 높음</span>`,
-      raw: diff
+      html: `<span class="tag-bad">${theirLabel} 대비 ${absWon}원 비쌈 (${absPct}%)</span>`,
+      raw: pct
     };
-  } else {
-    return {
-      html: `<span class="tag-good">${theirLabel} 대비 ${myLabel} ${absPct}% 저렴</span>`,
-      raw: diff
-    };
+  }
+  return {
+    html: `<span class="tag-good">${theirLabel} 대비 ${absWon}원 저렴 (${absPct}%)</span>`,
+    raw: pct
+  };
+}
+
+function hideLoading() {
+  const ov = document.getElementById('loadingOverlay');
+  if (ov) {
+    ov.classList.add('hidden');
+    setTimeout(() => ov.style.display = 'none', 500);
   }
 }
 
 async function loadData() {
   if (APPS_SCRIPT_URL.startsWith('YOUR_')) {
     document.getElementById('sectionContainer').innerHTML = '<div class="bg-amber-50 p-6 rounded-xl">⚠️ Apps Script URL 미설정</div>';
+    hideLoading();
     return;
   }
   try {
@@ -160,18 +240,28 @@ async function loadData() {
     allSkus = data.skus || [];
     allCounts = data.counts || {};
     allMargins = data.margins || {};
+    allMarginLabels = data.marginLabels || {
+      vendorDiscount: '벤더 할인율',
+      camfit: '캠핏 마진',
+      camp: '캠핑장 마진',
+      offline: '오프라인 추가'
+    };
     allVendors = data.vendors || [];
     document.getElementById('updatedAt').textContent =
       `갱신: ${new Date(data.generatedAt).toLocaleString('ko-KR')}`;
     document.getElementById('marginInfo').innerHTML = `
-      <div>벤더 할인율 <span class="float-right">${fmtPct(allMargins.vendorDiscount,0)}</span></div>
-      <div>캠핏 마진 <span class="float-right">${fmtPct(allMargins.camfit,0)}</span></div>
-      <div>캠핑장 마진 <span class="float-right">${fmtPct(allMargins.camp,0)}</span></div>
-      <div>오프라인 추가 <span class="float-right">${fmtPct(allMargins.offline,0)}</span></div>
+      <div style="display:grid; grid-template-columns: 1fr auto; gap: 8px 10px; line-height: 1.35;">
+        <div>${allMarginLabels.vendorDiscount}</div><div class="font-bold text-gray-700 whitespace-nowrap">${fmtPct(allMargins.vendorDiscount,0)}</div>
+        <div>${allMarginLabels.camfit}</div><div class="font-bold text-gray-700 whitespace-nowrap">${fmtPct(allMargins.camfit,0)}</div>
+        <div>${allMarginLabels.camp}</div><div class="font-bold text-gray-700 whitespace-nowrap">${fmtPct(allMargins.camp,0)}</div>
+        <div>${allMarginLabels.offline}</div><div class="font-bold text-gray-700 whitespace-nowrap">${fmtPct(allMargins.offline,0)}</div>
+      </div>
     `;
     render();
+    hideLoading();
   } catch (e) {
     document.getElementById('updatedAt').textContent = `❌ 로드 실패: ${e.message}`;
+    hideLoading();
   }
 }
 
@@ -182,7 +272,8 @@ function render() {
     supply: renderSupplyAnalysis,
     online: renderOnlineAnalysis,
     offline: renderOfflineAnalysis,
-    sizes: renderSizes
+    sizes: renderSizes,
+    simulation: renderSimulation
   };
   const fn = map[currentSection] || renderDashboard;
   document.getElementById('sectionContainer').innerHTML = fn();
@@ -192,6 +283,7 @@ function render() {
   if (currentSection === 'online') drawOnlineChart();
   if (currentSection === 'offline') drawOfflineChart();
   if (currentSection === 'sizes') attachSizesHandlers();
+  if (currentSection === 'simulation') attachSimulationHandlers();
 }
 
 // ===== 1. 대시보드 =====
@@ -230,7 +322,6 @@ function renderDashboard() {
     totalsCum.S += (matrix[c].B + matrix[c].A + matrix[c].S);
   });
 
-  const camfitMargin = allMargins.camfit != null ? (allMargins.camfit*100).toFixed(0) + '%' : '-';
   const totalVendors = allVendors.length;
   const respondedVendors = allVendors.filter(v => v.status === 'O').length;
 
@@ -244,40 +335,42 @@ function renderDashboard() {
       ${kpiCard('초기 사입 SKU', total + '종', 'emerald')}
       ${kpiCard('견적 수령률', total ? Math.round(received/total*100)+'%' : '-', 'blue', `${received}/${total}`)}
       ${kpiCard('참여 벤더사', totalVendors + '곳', 'amber', `회신 ${respondedVendors}곳`)}
-      ${kpiCard('캠핏 마진율', camfitMargin, 'sky', '벤더 → 캠핑장 납품 마진')}
+      ${kpiCard('진행 요청 캠핑장', (allCounts.requestedCamps != null ? allCounts.requestedCamps : '-') + '곳', 'sky', '오더앤픽 신청 완료')}
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
       <div class="bg-white p-5 rounded-xl shadow-sm">
-        <h3 class="font-bold text-gray-900 mb-3">카테고리별 SKU 분포</h3>
-        <canvas id="categoryChart"></canvas>
+        <h3 class="font-bold text-gray-900 mb-1">캠핑장별 카테고리 SKU</h3>
+        <p class="text-xs text-gray-500 mb-3">각 캠핑장 사이즈에 들어가는 SKU 수</p>
+        <table class="compare">
+          <thead><tr>
+            <th class="text-left" style="width:130px;">카테고리</th>
+            <th>S (대형)</th>
+            <th>A (중형)</th>
+            <th>B (소형)</th>
+          </tr></thead>
+          <tbody>${tableRows}</tbody>
+          <tfoot>
+            <tr class="font-bold bg-gray-50">
+              <td class="text-left">합계</td>
+              <td>${totalsCum.S}</td>
+              <td>${totalsCum.A}</td>
+              <td>${totalsCum.B}</td>
+            </tr>
+          </tfoot>
+        </table>
       </div>
       <div class="bg-white p-5 rounded-xl shadow-sm">
-        <h3 class="font-bold text-gray-900 mb-3">캠핑장별 SKU 수</h3>
+        <h3 class="font-bold text-gray-900 mb-1">캠핑장별 SKU 수</h3>
+        <p class="text-xs text-gray-500 mb-3">사이즈별 SKU 누적 수</p>
         <canvas id="tierChart"></canvas>
       </div>
     </div>
 
     <div class="mt-4 bg-white p-5 rounded-xl shadow-sm">
-      <h3 class="font-bold text-gray-900 mb-1">캠핑장별 카테고리 SKU</h3>
-      <p class="text-xs text-gray-500 mb-3">각 캠핑장 사이즈에 실제로 들어가는 SKU 수 (사이즈가 클수록 더 많은 SKU 포함)</p>
-      <table class="compare" style="max-width:640px;">
-        <thead><tr>
-          <th class="text-left" style="width:140px;">카테고리</th>
-          <th style="width:120px;">S (대형)</th>
-          <th style="width:120px;">A (중형)</th>
-          <th style="width:120px;">B (소형)</th>
-        </tr></thead>
-        <tbody>${tableRows}</tbody>
-        <tfoot>
-          <tr class="font-bold bg-gray-50">
-            <td class="text-left">합계</td>
-            <td>${totalsCum.S}</td>
-            <td>${totalsCum.A}</td>
-            <td>${totalsCum.B}</td>
-          </tr>
-        </tfoot>
-      </table>
+      <h3 class="font-bold text-gray-900 mb-1">카테고리별 SKU 분포</h3>
+      <p class="text-xs text-gray-500 mb-3">카테고리별 SKU 수 (티어별 색상)</p>
+      <canvas id="categoryChart" style="max-height:380px;"></canvas>
     </div>
   `;
 }
@@ -295,11 +388,13 @@ function renderVendorPanel() {
       ? '<span class="badge bg-emerald-100 text-emerald-700">✓ 회신 완료</span>'
       : '<span class="badge bg-rose-100 text-rose-700">✗ 미회신</span>';
     const rowBg = isDone ? '' : 'bg-rose-50';
+    const noteHtml = v.note ? `<span class="text-gray-700">${v.note}</span>` : '<span class="text-gray-300">-</span>';
     return `<tr class="${rowBg}">
       <td class="text-left font-medium">${v.name}</td>
       <td class="text-left">${v.categories || '-'}</td>
       <td class="text-left text-gray-600">${v.brands || '-'}</td>
       <td>${badge}</td>
+      <td class="text-left text-xs">${noteHtml}</td>
     </tr>`;
   }).join('');
 
@@ -314,12 +409,13 @@ function renderVendorPanel() {
         ${kpiCard('미회신 (후속 컨택 필요)', pending + '곳', 'rose')}
       </div>
 
-      <table class="compare" style="max-width:900px;">
+      <table class="compare">
         <thead><tr>
-          <th class="text-left" style="width:160px;">업체명</th>
-          <th class="text-left" style="width:200px;">취급 카테고리</th>
-          <th class="text-left">취급 브랜드</th>
-          <th style="width:120px;">견적 회신</th>
+          <th class="text-left" style="width:140px;">업체명</th>
+          <th class="text-left" style="width:180px;">취급 카테고리</th>
+          <th class="text-left" style="width:200px;">취급 브랜드</th>
+          <th style="width:110px;">견적 회신</th>
+          <th class="text-left">특이사항</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -337,53 +433,78 @@ function kpiCard(label, value, color, sub='') {
 }
 
 function drawDashboardCharts() {
-  const catCounts = {};
-  allSkus.forEach(s => { catCounts[s.category] = (catCounts[s.category]||0)+1; });
-  const totalCount = allSkus.length;
-  const catLabels = Object.keys(catCounts).map(c => {
-    const pct = ((catCounts[c]/totalCount)*100).toFixed(1);
-    return `${categoryEmoji[c]||''} ${c} (${catCounts[c]}종 · ${pct}%)`;
+  // 카테고리별 × 티어별 단독 카운트 (스택용)
+  const categories = [...new Set(allSkus.map(s => s.category))];
+  const matrix = {};
+  categories.forEach(c => {
+    matrix[c] = { B:0, A:0, S:0 };
+    allSkus.filter(s => s.category === c).forEach(s => {
+      if (matrix[c][s.tier] !== undefined) matrix[c][s.tier]++;
+    });
   });
+  // 합계 큰 순으로 정렬
+  const sortedCats = [...categories].sort((a,b) => {
+    const sa = matrix[a].B + matrix[a].A + matrix[a].S;
+    const sb = matrix[b].B + matrix[b].A + matrix[b].S;
+    return sb - sa;
+  });
+  const labels = sortedCats.map(c => `${categoryEmoji[c]||''} ${c}`);
+
   new Chart(document.getElementById('categoryChart'), {
-    type: 'doughnut',
+    type: 'bar',
     data: {
-      labels: catLabels,
-      datasets: [{ data: Object.values(catCounts), backgroundColor: ['#5fa777','#7e8d3a','#d4791f','#c97b7b','#7a5a3a','#5b89a7','#9b6db2','#a0a0a0'] }]
+      labels: labels,
+      datasets: [
+        { label: 'B (소형)', data: sortedCats.map(c => matrix[c].B), backgroundColor: '#66bb6a', borderWidth: 0 },
+        { label: 'A (중형 추가)', data: sortedCats.map(c => matrix[c].A), backgroundColor: '#fdd835', borderWidth: 0 },
+        { label: 'S (대형 추가)', data: sortedCats.map(c => matrix[c].S), backgroundColor: '#ff7043', borderWidth: 0 }
+      ]
     },
     options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
       plugins: {
-        legend: { position: 'right', labels: { font: { size: 12 } } },
+        legend: { position: 'top', labels: { font: { size: 12 } } },
         tooltip: {
           callbacks: {
-            label: (ctx) => {
-              const v = ctx.parsed;
-              const pct = ((v/totalCount)*100).toFixed(1);
-              return `${v}종 (${pct}%)`;
+            label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.x}종`,
+            footer: (items) => {
+              const total = items.reduce((sum,i) => sum + i.parsed.x, 0);
+              return `합계: ${total}종`;
             }
           }
         }
+      },
+      scales: {
+        x: { stacked: true, beginAtZero: true, ticks: { stepSize: 2 } },
+        y: { stacked: true }
       }
     }
   });
+
   new Chart(document.getElementById('tierChart'), {
     type: 'bar',
     data: {
       labels: ['S (대형 캠핑장)', 'A (중형 캠핑장)', 'B (소형 캠핑장)'],
-      datasets: [{ label: '누적 SKU 수', data: [allCounts.S, allCounts.A, allCounts.B], backgroundColor: ['#ff7043','#fdd835','#66bb6a'] }]
+      datasets: [{ label: '누적 SKU 수', data: [allCounts.S, allCounts.A, allCounts.B], backgroundColor: ['#ff7043','#fdd835','#66bb6a'], borderRadius: 6 }]
     },
-    options: { plugins: { legend: { display: false } } }
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
   });
 }
 
 // ===== 2. 전체 가격 비교 테이블 =====
 let tableFilters = { category: '', tier: '' };
 
-function compareCell(diff) {
-  if (typeof diff !== 'number') return '<span class="text-gray-300">-</span>';
-  const absPct = Math.abs(diff*100).toFixed(1);
-  if (Math.abs(diff) < 0.005) return '<span class="text-gray-500">동일</span>';
-  if (diff > 0) return `<span class="tag-bad">▲ ${absPct}%</span>`;
-  return `<span class="tag-good">▼ ${absPct}%</span>`;
+function compareCell(myVal, theirVal) {
+  if (myVal == null || theirVal == null || theirVal === 0) return '<span class="text-gray-300">-</span>';
+  const diffWon = Math.round(myVal - theirVal);
+  if (diffWon === 0) return '<span class="text-gray-500">동일</span>';
+  const pct = ((myVal - theirVal) / theirVal) * 100;
+  const absWon = Math.abs(diffWon).toLocaleString('ko-KR');
+  const absPct = Math.abs(pct).toFixed(1);
+  if (diffWon > 0) return `<span class="tag-bad">▲ ${absWon}원 비쌈 (${absPct}%)</span>`;
+  return `<span class="tag-good">▼ ${absWon}원 저렴 (${absPct}%)</span>`;
 }
 
 function getFilteredTableSkus() {
@@ -451,20 +572,20 @@ function renderTableRows(filtered) {
     return `<tr>
       <td class="text-left">${categoryEmoji[s.category]||''} ${s.category}</td>
       <td class="text-left">${s.brand||''}</td>
-      <td class="text-left font-medium">${s.name}</td>
+      <td class="text-left font-medium">${s.core ? '<span class="core-star">★</span>' : ''}${s.name}</td>
       <td>${s.spec||'-'}</td>
       <td>${stat}</td>
       <td>${tierBadgesInline(s.tier)}</td>
-      <td>${fmt(s.sysSupply)}</td>
-      <td>${fmt(s.sysMSRP)}</td>
-      <td>${fmt(s.coupang)}</td>
       <td>${fmt(s.vendor)}</td>
+      <td class="grp-camp">${fmt(s.sysSupply)}</td>
       <td class="font-medium grp-camp">${fmt(s.campSupply)}</td>
-      <td class="grp-camp">${compareCell(s.vsSysSupply)}</td>
+      <td class="grp-camp">${compareCell(s.campSupply, s.sysSupply)}</td>
+      <td class="grp-online">${fmt(s.coupang)}</td>
       <td class="font-medium grp-online">${fmt(s.online)}</td>
-      <td class="grp-online">${compareCell(s.vsCoupang)}</td>
+      <td class="grp-online">${compareCell(s.online, s.coupang)}</td>
+      <td class="grp-offline">${fmt(s.sysMSRP)}</td>
       <td class="font-medium grp-offline">${fmt(s.offline)}</td>
-      <td class="grp-offline">${compareCell(s.vsSysMSRP)}</td>
+      <td class="grp-offline">${compareCell(s.offline, s.sysMSRP)}</td>
     </tr>`;
   }).join('');
 }
@@ -473,6 +594,638 @@ function updateTableView() {
   const filtered = getFilteredTableSkus();
   document.getElementById('tableSummary').innerHTML = renderTableSummary(filtered);
   document.getElementById('tableBody').innerHTML = renderTableRows(filtered);
+  // 행 클릭 시 모달
+  document.querySelectorAll('#tableBody tr').forEach((tr, idx) => {
+    tr.addEventListener('click', () => showSkuModal(filtered[idx]));
+  });
+}
+
+// ===== 상품 상세 모달 =====
+function showSkuModal(s) {
+  if (!s) return;
+  const emoji = categoryEmoji[s.category] || '📦';
+  const containerClass = 'w-full aspect-square bg-gray-50 rounded-lg flex flex-col items-center justify-center text-gray-400 overflow-hidden';
+  const imageHtml = s.image && s.image.trim()
+    ? `<div class="${containerClass}" style="max-width:260px;">
+         <img src="${s.image.replace(/"/g,'&quot;')}" alt=""
+              class="max-h-full max-w-full object-contain"
+              onerror="window.showImgFail(this.parentElement, ${JSON.stringify(emoji)})" />
+       </div>`
+    : `<div class="${containerClass}" style="max-width:260px;"><div class="text-5xl">${emoji}</div><div class="text-xs mt-2">이미지 없음</div></div>`;
+
+  const statusBadge = s.quoteStatus === '미수령'
+    ? '<span class="badge bg-amber-100 text-amber-800">🟡 견적 미수령</span>'
+    : '<span class="badge bg-emerald-100 text-emerald-800">✓ 견적 수령</span>';
+
+  // 절대 차이(원) 계산
+  const diffBlock = (myLabel, myVal, theirLabel, theirVal, bg) => {
+    if (myVal == null || theirVal == null) {
+      return `<div class="rounded-xl p-4" style="background:${bg};">
+        <div class="text-xs text-gray-600 font-semibold mb-2">${myLabel} vs ${theirLabel}</div>
+        <div class="text-gray-400">비교불가</div>
+      </div>`;
+    }
+    const diffWon = Math.round(myVal - theirVal);
+    const pct = ((myVal - theirVal) / theirVal) * 100;
+    const absWon = Math.abs(diffWon).toLocaleString('ko-KR');
+    const absPct = Math.abs(pct).toFixed(1);
+    const isHigher = diffWon > 0;
+    const isSame = diffWon === 0;
+    const colorClass = isSame ? 'text-gray-500' : (isHigher ? 'text-rose-600' : 'text-blue-600');
+    const label = isSame ? '동일' : (isHigher ? '비쌈' : '저렴');
+    const sign = isSame ? '' : (isHigher ? '▲' : '▼');
+    return `<div class="rounded-xl p-4" style="background:${bg};">
+      <div class="text-xs text-gray-600 font-semibold mb-2">${myLabel} vs ${theirLabel}</div>
+      <div class="flex items-baseline gap-2 mb-1">
+        <span class="text-xs text-gray-500">${myLabel}</span>
+        <span class="font-mono font-bold">${fmt(myVal)}원</span>
+      </div>
+      <div class="flex items-baseline gap-2 mb-2">
+        <span class="text-xs text-gray-500">${theirLabel}</span>
+        <span class="font-mono">${fmt(theirVal)}원</span>
+      </div>
+      <div class="pt-2 border-t border-gray-200/70">
+        <div class="${colorClass} font-bold text-lg">${sign} ${absWon}원 ${label}</div>
+        <div class="${colorClass} text-xs">(${absPct}%)</div>
+      </div>
+    </div>`;
+  };
+
+  const modal = document.getElementById('skuModal');
+  modal.className = 'modal-backdrop';
+  modal.innerHTML = `
+    <div class="modal-box relative" onclick="event.stopPropagation()">
+      <button class="modal-close" onclick="hideSkuModal()">×</button>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div>${imageHtml}</div>
+        <div>
+          <div class="text-xs text-gray-500">${emoji} ${s.category} · ${s.brand||''}</div>
+          <div class="text-2xl font-bold text-gray-900 mt-1">${s.core ? '<span class="core-star">★</span>' : ''}${s.name}</div>
+          <div class="text-sm text-gray-500 mt-1">${s.spec || ''}</div>
+          <div class="mt-3 flex flex-wrap gap-2">${statusBadge} ${tierBadgesInline(s.tier)}</div>
+          <div class="mt-4 grid grid-cols-2 gap-2 text-xs">
+            <div class="bg-gray-50 rounded p-2">
+              <div class="text-gray-500">벤더 공급가</div>
+              <div class="font-mono font-bold">${fmt(s.vendor)}원</div>
+            </div>
+            <div class="bg-gray-50 rounded p-2">
+              <div class="text-gray-500">캠핑장 납품가</div>
+              <div class="font-mono font-bold">${fmt(s.campSupply)}원</div>
+            </div>
+            <div class="bg-gray-50 rounded p-2">
+              <div class="text-gray-500">온라인 판매가</div>
+              <div class="font-mono font-bold">${fmt(s.online)}원</div>
+            </div>
+            <div class="bg-gray-50 rounded p-2">
+              <div class="text-gray-500">오프라인 판매가</div>
+              <div class="font-mono font-bold">${fmt(s.offline)}원</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="mt-5 space-y-3">
+        ${diffBlock('캠핑장 납품가', s.campSupply, '시스페이스 공급가', s.sysSupply, '#e3f2fd')}
+        ${diffBlock('온라인 판매가', s.online, '쿠팡 판매가', s.coupang, '#fff3e0')}
+        ${diffBlock('오프라인 판매가', s.offline, '시스페이스 권장가', s.sysMSRP, '#fce4ec')}
+      </div>
+    </div>
+  `;
+  modal.classList.remove('hidden');
+  modal.addEventListener('click', hideSkuModal, { once: true });
+}
+
+function hideSkuModal() {
+  const modal = document.getElementById('skuModal');
+  modal.className = 'hidden';
+  modal.innerHTML = '';
+}
+
+// ===== 시뮬레이션 토글 =====
+window.toggleCalcDetail = function() {
+  const detail = document.getElementById('calcDetail');
+  const btn = document.getElementById('calcToggleBtn');
+  if (!detail || !btn) return;
+  if (detail.style.display === 'none') {
+    detail.style.display = 'block';
+    btn.textContent = '접기 ▲';
+  } else {
+    detail.style.display = 'none';
+    btn.textContent = '자세히 보기 ▼';
+  }
+};
+
+// ===== 시뮬레이션 =====
+const simState = {
+  revenuePerCamp: 1000000,    // 1개 캠핑장 월 매출 (총)
+  onlineRatio: 30,            // 온라인 비중 %
+  numCamps: 10,               // 캠핑장 수
+  camfitShare: 50,            // 캠핏 온라인 마진 쉐어 %
+  bm: null,                   // 캠핏 B2B 마진율 (%)
+  om: null,                   // 온라인 마진율 (%)
+  ofm: null,                  // 오프라인 추가율 (%)
+  pgOn: 3.3,                  // 온라인 PG 수수료 (%)
+  pgOff: 4                    // 오프라인 PG 수수료 (%)
+};
+
+function renderSimulation() {
+  const baseBm = Math.round((allMargins.camfit || 0) * 100);
+  const baseOm = Math.round((allMargins.camp || 0) * 100);
+  const baseOfm = Math.round((allMargins.offline || 0) * 100);
+  if (simState.bm === null) simState.bm = baseBm;
+  if (simState.om === null) simState.om = baseOm;
+  if (simState.ofm === null) simState.ofm = baseOfm;
+
+  return `
+    <h1 class="text-2xl font-bold text-gray-900 mb-1">시뮬레이션</h1>
+    <p class="text-sm text-gray-500 mb-4">캠핑장 매출 가정 시 캠핏·캠핑장·벤더 수익 시뮬레이션 (입력 변경 시 즉시 재계산)</p>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <h3 class="font-bold text-gray-900 mb-3">📥 매출 시나리오 입력</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">1개 캠핑장 월 매출 (원)</label>
+          <input id="simRevenue" type="number" step="100000" value="${simState.revenuePerCamp}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">캠핑장 수 (곳)</label>
+          <input id="simNumCamps" type="number" min="1" value="${simState.numCamps}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">온라인 비중 (%) — 사전 주문 픽업 매출</label>
+          <input id="simOnlineRatio" type="number" min="0" max="100" value="${simState.onlineRatio}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">캠핏 온라인 마진 쉐어 (%)</label>
+          <input id="simCamfitShare" type="number" min="0" max="100" value="${simState.camfitShare}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <h3 class="font-bold text-gray-900 mb-1">📐 마진율 조정 (페이지 내 임시 — 시트는 수정 안 됨)</h3>
+      <p class="text-xs text-gray-500 mb-3">시트 기준값: 캠핏 B2B ${baseBm}% · 온라인 ${baseOm}% · 오프라인 ${baseOfm}%</p>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">캠핏 B2B 마진 (%) — 벤더→캠핑장 납품</label>
+          <input id="simBm" type="number" min="0" step="1" value="${simState.bm}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">온라인 마진 (%) — 캠핑장 납품→온라인</label>
+          <input id="simOm" type="number" min="0" step="1" value="${simState.om}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">오프라인 추가 (%) — 캠핑장 납품→오프라인</label>
+          <input id="simOfm" type="number" min="0" step="1" value="${simState.ofm}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">온라인 PG 수수료 (%) — 캠핏 부담</label>
+          <input id="simPgOn" type="number" min="0" step="0.1" value="${simState.pgOn}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">오프라인 PG 수수료 (%) — 캠핑장 부담</label>
+          <input id="simPgOff" type="number" min="0" step="0.1" value="${simState.pgOff}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+      </div>
+      <button id="simReset" class="mt-3 text-xs text-blue-600 hover:underline">↺ 시트 기준값으로 초기화 (마진율만)</button>
+    </section>
+
+    <div id="simResult"></div>
+  `;
+}
+
+function attachSimulationHandlers() {
+  ['simRevenue','simNumCamps','simOnlineRatio','simCamfitShare','simBm','simOm','simOfm','simPgOn','simPgOff'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => {
+      simState.revenuePerCamp = parseFloat(document.getElementById('simRevenue').value) || 0;
+      simState.numCamps = parseInt(document.getElementById('simNumCamps').value) || 1;
+      simState.onlineRatio = parseFloat(document.getElementById('simOnlineRatio').value) || 0;
+      simState.camfitShare = parseFloat(document.getElementById('simCamfitShare').value) || 0;
+      simState.bm = parseFloat(document.getElementById('simBm').value) || 0;
+      simState.om = parseFloat(document.getElementById('simOm').value) || 0;
+      simState.ofm = parseFloat(document.getElementById('simOfm').value) || 0;
+      simState.pgOn = parseFloat(document.getElementById('simPgOn').value) || 0;
+      simState.pgOff = parseFloat(document.getElementById('simPgOff').value) || 0;
+      updateSimResult();
+    });
+  });
+  document.getElementById('simReset').addEventListener('click', () => {
+    simState.bm = Math.round((allMargins.camfit || 0) * 100);
+    simState.om = Math.round((allMargins.camp || 0) * 100);
+    simState.ofm = Math.round((allMargins.offline || 0) * 100);
+    document.getElementById('simBm').value = simState.bm;
+    document.getElementById('simOm').value = simState.om;
+    document.getElementById('simOfm').value = simState.ofm;
+    updateSimResult();
+  });
+  updateSimResult();
+}
+
+function updateSimResult() {
+  const R = simState.revenuePerCamp;
+  const N = simState.numCamps;
+  const onR = simState.onlineRatio / 100;
+  const offR = 1 - onR;
+  const cs = simState.camfitShare / 100;
+  const bm = simState.bm / 100;
+  const om = simState.om / 100;
+  const ofm = simState.ofm / 100;
+  const pgOn = simState.pgOn / 100;
+  const pgOff = simState.pgOff / 100;
+
+  // 1개 캠핑장 기준 분해
+  const R_on = R * onR;
+  const R_off = R * offR;
+  const campSupplyOn = R_on / (1 + om);
+  const campSupplyOff = R_off / (1 + ofm);
+  const campSupplyTotal = campSupplyOn + campSupplyOff;
+  const vendorTotal = campSupplyTotal / (1 + bm);
+
+  // PG 수수료
+  const pgFeeOnline = R_on * pgOn;       // 온라인 PG (캠핏 부담)
+  const pgFeeOffline = R_off * pgOff;    // 오프라인 PG (캠핑장 부담)
+  const pgTotal = pgFeeOnline + pgFeeOffline;
+
+  // 캠핏 마진 (온라인 차익에서 PG 차감)
+  const camfitB2B = campSupplyTotal - vendorTotal;
+  const onlineMargin = R_on - pgFeeOnline - campSupplyOn;
+  const camfitB2C = onlineMargin * cs;
+  const camfitTotal = camfitB2B + camfitB2C;
+
+  // 캠핑장 마진 (오프라인에서 PG 차감)
+  const campB2C = onlineMargin * (1 - cs);
+  const campOffline = R_off - pgFeeOffline - campSupplyOff;
+  const campTotal = campB2C + campOffline;
+
+  // N개 캠핑장 합계
+  const camfitAll = camfitTotal * N;
+  const campAll = campTotal * N;
+  const gmvAll = R * N;
+  const camfitRevAll = (campSupplyTotal + camfitB2C) * N;
+
+  const won = (n) => Math.round(n).toLocaleString('ko-KR') + '원';
+  const pct = (n, base) => base > 0 ? ((n/base)*100).toFixed(1) + '%' : '-';
+  const csOther = 100 - simState.camfitShare;
+
+  document.getElementById('simResult').innerHTML = `
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <h3 class="font-bold text-gray-900 mb-3">📊 결과 — 1개 캠핑장 기준 (월)</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="rounded-xl p-4" style="background:#e3f2fd;">
+          <div class="text-xs text-blue-700 font-semibold">캠핏 수익</div>
+          <div class="text-2xl font-bold text-blue-900 mt-1">${won(camfitTotal)}</div>
+          <div class="text-xs text-blue-700 mt-1">매출 대비 ${pct(camfitTotal, R)}</div>
+          <div class="mt-3 text-xs text-gray-700 space-y-1">
+            <div>├ B2B 납품 마진: <b>${won(camfitB2B)}</b></div>
+            <div>└ B2C 온라인 쉐어 (${simState.camfitShare}%): <b>${won(camfitB2C)}</b></div>
+          </div>
+        </div>
+        <div class="rounded-xl p-4" style="background:#fff3e0;">
+          <div class="text-xs text-orange-700 font-semibold">캠핑장 수익</div>
+          <div class="text-2xl font-bold text-orange-900 mt-1">${won(campTotal)}</div>
+          <div class="text-xs text-orange-700 mt-1">매출 대비 ${pct(campTotal, R)}</div>
+          <div class="mt-3 text-xs text-gray-700 space-y-1">
+            <div>├ B2C 온라인 쉐어 (${csOther}%): <b>${won(campB2C)}</b></div>
+            <div>└ 오프라인 직접 마진: <b>${won(campOffline)}</b></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <div class="flex justify-between items-center cursor-pointer" onclick="toggleCalcDetail()">
+        <h3 class="font-bold text-gray-900">🧮 계산 과정 (1개 캠핑장 기준)</h3>
+        <button id="calcToggleBtn" class="text-xs px-3 py-1 rounded bg-gray-100 hover:bg-gray-200 text-gray-700">자세히 보기 ▼</button>
+      </div>
+      <div id="calcDetail" style="display:none; margin-top:12px;">
+      <div class="bg-gray-50 rounded-xl p-4 mb-3 text-xs text-gray-700">
+        <div class="font-bold text-gray-800 mb-2">📐 단위당 가격 구조 (예: 벤더 공급가 100원 SKU 기준)</div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 font-mono">
+          <div class="bg-white p-3 rounded border border-gray-200">
+            <div class="text-gray-500">벤더 공급가</div>
+            <div class="text-lg font-bold">100원</div>
+          </div>
+          <div class="bg-white p-3 rounded border border-gray-200">
+            <div class="text-gray-500">캠핑장 납품가</div>
+            <div class="text-lg font-bold">${(100*(1+bm)).toFixed(0)}원</div>
+            <div class="text-xs mt-1" style="color:#1565c0;">+${(100*bm).toFixed(0)}원 (캠핏 B2B 마진 ${simState.bm}%)</div>
+          </div>
+          <div class="bg-white p-3 rounded border border-gray-200">
+            <div class="text-gray-500">판매가</div>
+            <div class="text-sm font-bold" style="color:#d4791f;">온라인 ${(100*(1+bm)*(1+om)).toFixed(0)}원</div>
+            <div class="text-xs mt-1" style="color:#d4791f;">+${(100*(1+bm)*om).toFixed(1)}원 (온라인 마진 ${simState.om}%) − PG ${simState.pgOn}%</div>
+            <div class="text-sm font-bold mt-2" style="color:#e65100;">오프라인 ${(100*(1+bm)*(1+ofm)).toFixed(0)}원</div>
+            <div class="text-xs mt-1" style="color:#e65100;">+${(100*(1+bm)*ofm).toFixed(1)}원 (오프라인 마진 ${simState.ofm}%) − PG ${simState.pgOff}%</div>
+          </div>
+        </div>
+        ${(() => {
+          const onlinePrice = 100*(1+bm)*(1+om);
+          const offlinePrice = 100*(1+bm)*(1+ofm);
+          const pgOnUnit = onlinePrice * pgOn;
+          const pgOffUnit = offlinePrice * pgOff;
+          const marginOnlineAfterPg = (100*(1+bm)*om) - pgOnUnit;
+          const marginOfflineAfterPg = (100*(1+bm)*ofm) - pgOffUnit;
+          const camfitB2CUnit = marginOnlineAfterPg * cs;
+          const campB2CUnit = marginOnlineAfterPg * (1-cs);
+          return `
+          <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+            <div class="text-gray-600">
+              온라인 PG ${pgOnUnit.toFixed(2)}원 차감 후 차익 ${marginOnlineAfterPg.toFixed(2)}원<br>
+              → 캠핏 ${simState.camfitShare}% / 캠핑장 ${csOther}%
+            </div>
+            <div style="color:#1565c0;">단위당 캠핏 = B2B ${(100*bm).toFixed(0)}원 + 온라인 쉐어 ${camfitB2CUnit.toFixed(2)}원</div>
+            <div style="color:#e65100;">단위당 캠핑장 = 온라인 쉐어 ${campB2CUnit.toFixed(2)}원 + 오프라인 ${marginOfflineAfterPg.toFixed(2)}원 (PG 차감 후)</div>
+          </div>`;
+        })()}
+      </div>
+
+      <div class="text-xs text-gray-700 space-y-2 font-mono">
+        <div><b>STEP 1.</b> 캠핑장 매출 구성</div>
+        <div class="pl-4 text-gray-600">
+          R = ${won(R)}<br>
+          온라인 매출 = R × ${simState.onlineRatio}% = <b>${won(R_on)}</b><br>
+          오프라인 매출 = R × ${(100-simState.onlineRatio).toFixed(0)}% = <b>${won(R_off)}</b>
+        </div>
+
+        <div class="mt-2"><b>STEP 2.</b> 캠핑장 납품 금액 (= 캠핏이 캠핑장에 받은 매입 총액)</div>
+        <div class="pl-4 text-gray-600">
+          ※ 캠핑장 납품가는 SKU당 단일 (위 표 기준 ${(100*(1+bm)).toFixed(0)}원). 매출에서 채널 마진 역산.<br>
+          온라인분 = 온라인 매출 ÷ (1 + ${simState.om}%) = ${won(R_on)} ÷ ${(1+om).toFixed(2)} = <b>${won(campSupplyOn)}</b><br>
+          오프라인분 = 오프라인 매출 ÷ (1 + ${simState.ofm}%) = ${won(R_off)} ÷ ${(1+ofm).toFixed(2)} = <b>${won(campSupplyOff)}</b><br>
+          <b>합계 = ${won(campSupplyTotal)}</b>
+        </div>
+
+        <div class="mt-2"><b>STEP 3.</b> 벤더 공급가 (캠핏이 벤더에 지급)</div>
+        <div class="pl-4 text-gray-600">
+          = 캠핑장 납품 금액 ÷ (1 + ${simState.bm}%) = ${won(campSupplyTotal)} ÷ ${(1+bm).toFixed(2)} = <b>${won(vendorTotal)}</b>
+        </div>
+
+        <div class="mt-2"><b>STEP 4.</b> 캠핏 B2B 납품 마진</div>
+        <div class="pl-4" style="color:#1565c0;">
+          = 캠핑장 납품 금액 − 벤더 공급가 = ${won(campSupplyTotal)} − ${won(vendorTotal)} = <b>${won(camfitB2B)}</b>
+        </div>
+
+        <div class="mt-2"><b>STEP 5.</b> 온라인 PG 수수료 (캠핏 부담)</div>
+        <div class="pl-4 text-gray-600">
+          = 온라인 매출 × ${simState.pgOn}% = ${won(R_on)} × ${simState.pgOn}% = <b>${won(pgFeeOnline)}</b>
+        </div>
+
+        <div class="mt-2"><b>STEP 6.</b> 온라인 차익 (PG 차감 후, 캠핏+캠핑장 분배 대상)</div>
+        <div class="pl-4 text-gray-600">
+          = 온라인 매출 − PG 수수료 − 캠핑장 납품가<br>
+          = ${won(R_on)} − ${won(pgFeeOnline)} − ${won(campSupplyOn)} = <b>${won(onlineMargin)}</b><br>
+          → 캠핏 ${simState.camfitShare}% : 캠핑장 ${csOther}% 로 분배
+        </div>
+
+        <div class="mt-2"><b>STEP 7.</b> 캠핏 B2C 온라인 쉐어</div>
+        <div class="pl-4" style="color:#1565c0;">
+          = 온라인 차익 × ${simState.camfitShare}% = ${won(onlineMargin)} × ${(cs*100).toFixed(0)}% = <b>${won(camfitB2C)}</b>
+        </div>
+
+        <div class="mt-2"><b>STEP 8.</b> 캠핑장 B2C 온라인 쉐어</div>
+        <div class="pl-4" style="color:#e65100;">
+          = 온라인 차익 × ${csOther}% = ${won(onlineMargin)} × ${(csOther).toFixed(0)}% = <b>${won(campB2C)}</b>
+        </div>
+
+        <div class="mt-2"><b>STEP 9.</b> 오프라인 PG 수수료 (캠핑장 부담)</div>
+        <div class="pl-4 text-gray-600">
+          = 오프라인 매출 × ${simState.pgOff}% = ${won(R_off)} × ${simState.pgOff}% = <b>${won(pgFeeOffline)}</b>
+        </div>
+
+        <div class="mt-2"><b>STEP 10.</b> 캠핑장 오프라인 직접 마진 (PG 차감 후)</div>
+        <div class="pl-4" style="color:#e65100;">
+          = 오프라인 매출 − PG − 캠핑장 납품가<br>
+          = ${won(R_off)} − ${won(pgFeeOffline)} − ${won(campSupplyOff)} = <b>${won(campOffline)}</b>
+        </div>
+
+        <div class="mt-3 p-3 rounded" style="background:#f0f0f0;">
+          <div style="color:#1565c0;"><b>▶ 캠핏 합계</b> = B2B 마진 + B2C 쉐어 = ${won(camfitB2B)} + ${won(camfitB2C)} = <b>${won(camfitTotal)}</b></div>
+          <div style="color:#e65100;"><b>▶ 캠핑장 합계</b> = B2C 쉐어 + 오프라인 마진 = ${won(campB2C)} + ${won(campOffline)} = <b>${won(campTotal)}</b></div>
+          <div class="mt-2 text-gray-500 text-xs">※ 벤더 ${won(vendorTotal)} + 캠핏 ${won(camfitTotal)} + 캠핑장 ${won(campTotal)} + PG ${won(pgTotal)} = ${won(vendorTotal + camfitTotal + campTotal + pgTotal)} (≈ 매출 ${won(R)})</div>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <h3 class="font-bold text-gray-900 mb-3">🏕 ${N}개 캠핑장 전체 (월)</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+        <div class="rounded-xl p-4 bg-emerald-50 border border-emerald-200">
+          <div class="text-xs text-emerald-700 font-semibold">총 GMV (캠퍼 결제 합계)</div>
+          <div class="text-2xl font-bold text-emerald-900 mt-1">${won(gmvAll)}</div>
+          <div class="text-xs text-emerald-700 mt-1">${won(R)} × ${N}곳</div>
+        </div>
+        <div class="rounded-xl p-4 border border-gray-300" style="background:#f5f5f5;">
+          <div class="text-xs text-gray-700 font-semibold">캠핏 매출 (회계 인식)</div>
+          <div class="text-2xl font-bold text-gray-900 mt-1">${won(camfitRevAll)}</div>
+          <div class="text-xs text-gray-600 mt-1">B2B 총액 + B2C 수수료</div>
+        </div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="rounded-xl p-4 bg-blue-50 border border-blue-200">
+          <div class="text-xs text-blue-700 font-semibold">캠핏 총 마진 (이익)</div>
+          <div class="text-2xl font-bold text-blue-900 mt-1">${won(camfitAll)}</div>
+          <div class="text-xs text-blue-700 mt-1">GMV 대비 ${pct(camfitAll, gmvAll)} · 매출 대비 ${pct(camfitAll, camfitRevAll)} · ${won(camfitTotal)} × ${N}</div>
+        </div>
+        <div class="rounded-xl p-4 bg-orange-50 border border-orange-200">
+          <div class="text-xs text-orange-700 font-semibold">캠핑장 총 마진 (합)</div>
+          <div class="text-2xl font-bold text-orange-900 mt-1">${won(campAll)}</div>
+          <div class="text-xs text-orange-700 mt-1">GMV 대비 ${pct(campAll, gmvAll)} · ${won(campTotal)} × ${N}</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5">
+      <h3 class="font-bold text-gray-900 mb-3">📐 적용 가정</h3>
+      <table class="compare" style="max-width:600px;">
+        <thead><tr><th class="text-left">항목</th><th>값</th></tr></thead>
+        <tbody>
+          <tr><td class="text-left">1개 캠핑장 월 매출</td><td>${won(R)}</td></tr>
+          <tr><td class="text-left">캠핑장 수</td><td>${N}곳</td></tr>
+          <tr><td class="text-left">온라인 / 오프라인 비중</td><td>${simState.onlineRatio}% / ${(100-simState.onlineRatio).toFixed(0)}%</td></tr>
+          <tr><td class="text-left">캠핏 / 캠핑장 온라인 쉐어</td><td>${simState.camfitShare}% / ${csOther}%</td></tr>
+          <tr><td class="text-left">캠핏 B2B 마진율</td><td>${simState.bm}%</td></tr>
+          <tr><td class="text-left">온라인 마진율</td><td>${simState.om}%</td></tr>
+          <tr><td class="text-left">오프라인 추가율</td><td>${simState.ofm}%</td></tr>
+          <tr><td class="text-left">온라인 PG 수수료</td><td>${simState.pgOn}% (캠핏 부담)</td></tr>
+          <tr><td class="text-left">오프라인 PG 수수료</td><td>${simState.pgOff}% (캠핑장 부담)</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mt-4">
+      <h3 class="font-bold text-gray-900 mb-1">💼 캠핏 매출 인식 (회계 관점) — ${N}개 캠핑장 기준</h3>
+      <p class="text-xs text-gray-500 mb-3">B2B = 직매입(총액) / B2C 온라인 = 중개(순액 — 수수료만) — K-IFRS 1115호 본인·대리인 모델</p>
+
+      ${(() => {
+        const b2bRevPerCamp = campSupplyTotal;
+        const b2cRevPerCamp = camfitB2C;
+        const camfitRevPerCamp = b2bRevPerCamp + b2cRevPerCamp;
+        const b2bRevAll = b2bRevPerCamp * N;
+        const b2cRevAll = b2cRevPerCamp * N;
+        const camfitRevAllSection = camfitRevPerCamp * N;
+        const camfitMarginAll = camfitTotal * N;
+        const camfitMarginRatio = camfitRevAllSection > 0 ? (camfitMarginAll / camfitRevAllSection * 100) : 0;
+        return `
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+          <div class="rounded-xl p-4 border border-blue-200" style="background:#e3f2fd;">
+            <div class="text-xs text-blue-700 font-semibold">B2B 매출 (직매입 모델)</div>
+            <div class="text-2xl font-bold text-blue-900 mt-1">${won(b2bRevAll)}</div>
+            <div class="text-xs text-blue-700 mt-1">1개 캠핑장 ${won(b2bRevPerCamp)} × ${N}곳</div>
+            <div class="text-xs text-blue-700 mt-0.5">캠핑장 납품 금액 전체 (총액 인식)</div>
+          </div>
+          <div class="rounded-xl p-4 border border-indigo-200" style="background:#e8eaf6;">
+            <div class="text-xs text-indigo-700 font-semibold">B2C 중개 매출 (수수료)</div>
+            <div class="text-2xl font-bold text-indigo-900 mt-1">${won(b2cRevAll)}</div>
+            <div class="text-xs text-indigo-700 mt-1">1개 캠핑장 ${won(b2cRevPerCamp)} × ${N}곳</div>
+            <div class="text-xs text-indigo-700 mt-0.5">캠퍼-캠핑장 거래 중개 수수료 (순액 인식)</div>
+          </div>
+        </div>
+
+        <div class="rounded-xl p-4 border border-gray-300" style="background:#f5f5f5;">
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-center">
+            <div>
+              <div class="text-xs text-gray-600">캠핏 총 매출 (${N}개 캠핑장)</div>
+              <div class="text-2xl font-bold text-gray-900 mt-1">${won(camfitRevAllSection)}</div>
+              <div class="text-xs text-gray-500 mt-1">B2B 총액 + B2C 수수료</div>
+            </div>
+            <div>
+              <div class="text-xs text-gray-600">캠핏 마진 (이익)</div>
+              <div class="text-2xl font-bold text-blue-700 mt-1">${won(camfitMarginAll)}</div>
+              <div class="text-xs text-gray-500 mt-1">B2B 마진 + B2C 쉐어</div>
+            </div>
+            <div>
+              <div class="text-xs text-gray-600">매출 대비 이익률</div>
+              <div class="text-2xl font-bold text-blue-700 mt-1">${camfitMarginRatio.toFixed(1)}%</div>
+              <div class="text-xs text-gray-500 mt-1">캠핏 이익 / 캠핏 매출</div>
+            </div>
+          </div>
+          <div class="mt-3 text-xs text-gray-500 text-center">
+            1개 캠핑장 기준: 매출 ${won(camfitRevPerCamp)} · 마진 ${won(camfitTotal)} · 이익률 ${camfitMarginRatio.toFixed(1)}%
+          </div>
+        </div>`;
+      })()}
+    </section>
+  `;
+}
+
+// ===== 사이즈별 초기 사입 상세 모달 =====
+function showSizeCostModal(tier) {
+  const sizeLabel = { S: 'S 대형', A: 'A 중형', B: 'B 소형' }[tier];
+  const headerColor = { S: '#bf360c', A: '#827717', B: '#1b5e20' }[tier];
+
+  let list;
+  if (tier === 'S') list = allSkus;
+  else if (tier === 'A') list = allSkus.filter(s => ['B','A'].includes(s.tier));
+  else list = allSkus.filter(s => s.tier === 'B');
+
+  const received = list.filter(s => typeof s.boxPrice === 'number');
+  const missing = list.filter(s => typeof s.boxPrice !== 'number');
+  const totalCost = received.reduce((sum, s) => sum + s.boxPrice, 0);
+
+  // 카테고리 → 상품명 순 정렬
+  const sortFn = (a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name);
+
+  // 카테고리별 소합계
+  const byCat = {};
+  received.forEach(s => {
+    if (!byCat[s.category]) byCat[s.category] = { count: 0, sum: 0 };
+    byCat[s.category].count++;
+    byCat[s.category].sum += s.boxPrice;
+  });
+  const catRows = Object.entries(byCat)
+    .sort((a,b) => b[1].sum - a[1].sum)
+    .map(([c, d]) => `<tr>
+      <td class="text-left">${categoryEmoji[c]||''} ${c}</td>
+      <td>${d.count}종</td>
+      <td class="font-bold">${fmt(d.sum)}원</td>
+      <td class="text-gray-500">${(d.sum/totalCost*100).toFixed(1)}%</td>
+    </tr>`).join('');
+
+  const receivedRows = received.sort(sortFn).map(s => `<tr>
+    <td class="text-left">${categoryEmoji[s.category]||''} ${s.category}</td>
+    <td class="text-left">${s.brand||''}</td>
+    <td class="text-left font-medium">${s.core ? '<span class="core-star">★</span>' : ''}${s.name}</td>
+    <td>${s.spec || '-'}</td>
+    <td class="font-bold">${fmt(s.boxPrice)}원</td>
+  </tr>`).join('');
+
+  const missingRows = missing.sort(sortFn).map(s => `<tr>
+    <td class="text-left">${categoryEmoji[s.category]||''} ${s.category}</td>
+    <td class="text-left">${s.brand||''}</td>
+    <td class="text-left font-medium">${s.core ? '<span class="core-star">★</span>' : ''}${s.name}</td>
+    <td>${s.spec || '-'}</td>
+    <td class="text-amber-700 font-medium">미수령</td>
+  </tr>`).join('');
+
+  const modal = document.getElementById('skuModal');
+  modal.className = 'modal-backdrop';
+  modal.innerHTML = `
+    <div class="modal-box relative" onclick="event.stopPropagation()" style="max-width:1000px;">
+      <button class="modal-close" onclick="hideSkuModal()">×</button>
+      <h2 class="text-2xl font-bold" style="color:${headerColor};">${sizeLabel} 캠핑장 — 초기 사입 상세</h2>
+      <p class="text-sm text-gray-500 mt-1">전체 ${list.length}종 · 견적 수령 ${received.length}종 · 미수령 ${missing.length}종</p>
+
+      <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div class="rounded-xl p-4 col-span-1 md:col-span-2" style="background:#f0f8ff;">
+          <div class="text-xs text-gray-600">견적 수령 SKU 합산</div>
+          <div class="text-3xl font-bold text-blue-700 mt-1">${fmt(totalCost)}원</div>
+          <div class="text-xs text-gray-500 mt-1">한 박스씩 매입 시 예상 비용</div>
+        </div>
+        <div class="rounded-xl p-4" style="background:#fff3e0;">
+          <div class="text-xs text-amber-800">미수령 ${missing.length}종 제외</div>
+          <div class="text-xs text-gray-600 mt-2">견적 회신 시 추가 합산 예정</div>
+        </div>
+      </div>
+
+      ${catRows ? `
+        <h3 class="font-bold mt-5 mb-2">카테고리별 합계</h3>
+        <div class="overflow-auto">
+          <table class="compare" style="max-width:600px;">
+            <thead><tr>
+              <th class="text-left" style="width:200px;">카테고리</th>
+              <th>SKU 수</th>
+              <th>박스 매입가 합계</th>
+              <th>비중</th>
+            </tr></thead>
+            <tbody>${catRows}</tbody>
+          </table>
+        </div>
+      ` : ''}
+
+      <h3 class="font-bold mt-5 mb-2">✓ 견적 수령 SKU (${received.length}종)</h3>
+      <div class="overflow-auto">
+        <table class="compare">
+          <thead><tr>
+            <th class="text-left">카테고리</th>
+            <th class="text-left">브랜드</th>
+            <th class="text-left">상품명</th>
+            <th>규격</th>
+            <th>박스 매입가</th>
+          </tr></thead>
+          <tbody>${receivedRows}</tbody>
+        </table>
+      </div>
+
+      ${missing.length > 0 ? `
+        <h3 class="font-bold mt-5 mb-2 text-amber-700">⚠️ 견적 미수령 SKU (${missing.length}종)</h3>
+        <p class="text-xs text-gray-500 mb-2">아래 SKU의 박스 매입가는 합산에 포함되지 않음 (벤더 견적 회신 대기 중)</p>
+        <div class="overflow-auto">
+          <table class="compare">
+            <thead><tr>
+              <th class="text-left">카테고리</th>
+              <th class="text-left">브랜드</th>
+              <th class="text-left">상품명</th>
+              <th>규격</th>
+              <th>박스 매입가</th>
+            </tr></thead>
+            <tbody>${missingRows}</tbody>
+          </table>
+        </div>
+      ` : ''}
+    </div>
+  `;
+  modal.classList.remove('hidden');
+  modal.addEventListener('click', hideSkuModal, { once: true });
 }
 
 function attachTableHandlers() {
@@ -542,14 +1295,14 @@ function renderTable() {
             <th>규격</th>
             <th>견적상태</th>
             <th>납품 캠핑장</th>
-            <th>시스페이스<br>공급가</th>
-            <th>시스페이스<br>권장가</th>
-            <th>쿠팡<br>판매가</th>
             <th>벤더<br>공급가</th>
+            <th class="grp-camp">시스페이스<br>공급가</th>
             <th class="grp-camp">캠핑장<br>납품가</th>
             <th class="grp-camp">vs 시스페이스<br>공급가</th>
+            <th class="grp-online">쿠팡<br>판매가</th>
             <th class="grp-online">온라인<br>판매가</th>
             <th class="grp-online">vs 쿠팡<br>판매가</th>
+            <th class="grp-offline">시스페이스<br>권장가</th>
             <th class="grp-offline">오프라인<br>판매가</th>
             <th class="grp-offline">vs 시스페이스<br>권장가</th>
           </tr>
@@ -560,174 +1313,285 @@ function renderTable() {
   `;
 }
 
-// ===== 3. 캠핑장 납품 분석 =====
-function renderSupplyAnalysis() {
-  const list = allSkus.filter(s => typeof s.vsSysSupply === 'number');
-  const good = list.filter(s=>s.vsSysSupply<0).length;
-  const bad = list.filter(s=>s.vsSysSupply>0).length;
-  const rows = [...list].sort((a,b)=>a.vsSysSupply-b.vsSysSupply).map(s => {
-    const cmp = compareLabel(s.campSupply, s.sysSupply, '오더앤픽 납품가', '시스페이스 공급가');
-    return `<tr>
-      <td class="text-left">${categoryEmoji[s.category]||''} ${s.brand} · ${s.name}</td>
-      <td>${fmt(s.sysSupply)}</td>
-      <td class="font-medium">${fmt(s.campSupply)}</td>
-      <td>${cmp.html}</td>
-    </tr>`;
-  }).join('');
+// ===== 3·4·5. 분석 페이지 (공통 구조) =====
+const analysisFilters = {
+  supply: { category: '', sort: 'diff-desc' },
+  online: { category: '', sort: 'diff-desc' },
+  offline: { category: '', sort: 'diff-desc' }
+};
+
+function getAnalysisConfig(type) {
+  const map = {
+    supply: {
+      title: '캠핑장 납품 분석',
+      desc: '시스페이스 공급가 대비 오더앤픽 납품가 비교 — 캠지기 입장에서 캠핏이 더 좋은 조건인가?',
+      myKey: 'campSupply', theirKey: 'sysSupply', diffKey: 'vsSysSupply',
+      myLabel: '오더앤픽 납품가', theirLabel: '시스페이스 공급가',
+      bg: '#e3f2fd',
+      goodLabel: '캠지기 이득 (캠핏이 더 쌈)', badLabel: '캠지기 손해 (캠핏이 더 비쌈)',
+      threshold: 0
+    },
+    online: {
+      title: '온라인 판매가 분석',
+      desc: '쿠팡 온라인 판매가 대비 오더앤픽 온라인 판매가 비교 — 캠퍼가 캠핏 앱에서 살 만한 가격인가?',
+      myKey: 'online', theirKey: 'coupang', diffKey: 'vsCoupang',
+      myLabel: '오더앤픽 온라인 판매가', theirLabel: '쿠팡 온라인 판매가',
+      bg: '#fff3e0',
+      goodLabel: '쿠팡과 비슷·저렴 (≤ 30%)', badLabel: '쿠팡 대비 30% 이상 비쌈',
+      threshold: 0.3
+    },
+    offline: {
+      title: '오프라인 판매가 분석',
+      desc: '시스페이스 권장 판매가 대비 오더앤픽 오프라인 판매가 비교 — 캠지기 매점에서 캠퍼가 받는 가격',
+      myKey: 'offline', theirKey: 'sysMSRP', diffKey: 'vsSysMSRP',
+      myLabel: '오더앤픽 오프라인 판매가', theirLabel: '시스페이스 권장가',
+      bg: '#fce4ec',
+      goodLabel: '시스페이스 이하 (경쟁력 있음)', badLabel: '시스페이스보다 비쌈 (캠퍼 부담)',
+      threshold: 0
+    }
+  };
+  return map[type];
+}
+
+function computeInsight(list, cfg) {
+  if (!list.length) return '';
+  const nums = list.map(s => s[cfg.diffKey]);
+  const avg = nums.reduce((a,b)=>a+b,0) / nums.length;
+  const sortedDesc = [...list].sort((a,b) => b[cfg.diffKey] - a[cfg.diffKey]);
+  const max = sortedDesc[0];
+  const min = sortedDesc[sortedDesc.length - 1];
+
+  // 카테고리별 평균
+  const byCat = {};
+  list.forEach(s => {
+    if (!byCat[s.category]) byCat[s.category] = { sum:0, count:0 };
+    byCat[s.category].sum += s[cfg.diffKey];
+    byCat[s.category].count++;
+  });
+  const catAvgs = Object.entries(byCat).map(([c, d]) => ({c, avg: d.sum/d.count}));
+  catAvgs.sort((a,b) => b.avg - a.avg);
+  const topCat = catAvgs[0];
+
+  const avgPct = (avg*100).toFixed(1);
+  const avgWord = avg > 0 ? '비쌈' : '저렴';
+  const avgColor = avg > 0 ? 'text-rose-600' : 'text-blue-600';
+
   return `
-    <h1 class="text-2xl font-bold text-gray-900 mb-1">캠핑장 납품 분석</h1>
-    <p class="text-sm text-gray-500 mb-4">시스페이스 공급가 대비 오더앤픽 납품가 비교 — 캠지기 입장에서 캠핏이 더 좋은 조건인가?</p>
-
-    <div class="grid grid-cols-3 gap-4 mb-4">
-      ${kpiCard('비교 가능 SKU', list.length+'종', 'gray')}
-      ${kpiCard('캠지기 이득 (캠핏이 더 쌈)', good+'종', 'blue')}
-      ${kpiCard('캠지기 손해 (캠핏이 더 비쌈)', bad+'종', 'rose')}
+    <div class="rounded-xl p-4 mb-4 border border-gray-200" style="background: linear-gradient(to right, ${cfg.bg}, white);">
+      <h3 class="text-sm font-bold text-gray-700 mb-2">💡 요약 인사이트</h3>
+      <ul class="text-sm text-gray-700 space-y-1">
+        <li>• 평균 차이: <b class="${avgColor}">${Math.abs(avg*100).toFixed(1)}% ${avgWord}</b></li>
+        <li>• 가장 비쌈: <b>${max.name}</b> (▲ ${(max[cfg.diffKey]*100).toFixed(1)}%)</li>
+        <li>• 가장 저렴: <b>${min.name}</b> (${min[cfg.diffKey] < 0 ? '▼' : '▲'} ${Math.abs(min[cfg.diffKey]*100).toFixed(1)}%)</li>
+        <li>• 평균이 가장 비싼 카테고리: <b>${categoryEmoji[topCat.c]||''} ${topCat.c}</b> (평균 ${(topCat.avg*100).toFixed(1)}%)</li>
+      </ul>
     </div>
+  `;
+}
 
+function renderAnalysisPage(type) {
+  const cfg = getAnalysisConfig(type);
+  return `
+    <h1 class="text-2xl font-bold text-gray-900 mb-1">${cfg.title}</h1>
+    <p class="text-sm text-gray-500 mb-3">${cfg.desc}</p>
+
+    <!-- 요약 인사이트 -->
+    <div id="analysisInsight_${type}"></div>
+
+    <!-- 필터 -->
+    <section class="bg-white rounded-xl shadow-sm p-4 mb-4">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-2xl">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">카테고리</label>
+          <select id="analysisCat_${type}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="">전체</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">정렬</label>
+          <select id="analysisSort_${type}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="diff-desc">비쌈 → 저렴 (높은순)</option>
+            <option value="diff-asc">저렴 → 비쌈 (낮은순)</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- KPI -->
+    <div id="analysisKpi_${type}"></div>
+
+    <!-- 차트 -->
     <div class="bg-white p-5 rounded-xl shadow-sm mb-4">
-      <h3 class="font-bold text-gray-900 mb-3">SKU별 격차 (- 면 캠지기 이득)</h3>
-      <canvas id="supplyChart" height="100"></canvas>
+      <h3 class="font-bold text-gray-900 mb-3" id="analysisChartTitle_${type}">SKU별 격차</h3>
+      <div style="position: relative; height: 380px;">
+        <canvas id="analysisChart_${type}"></canvas>
+      </div>
     </div>
 
+    <!-- 테이블 -->
     <div class="bg-white rounded-xl shadow-sm overflow-auto">
       <table class="compare">
         <thead><tr>
           <th class="text-left">SKU</th>
-          <th>시스페이스 공급가</th>
-          <th>오더앤픽 납품가</th>
+          <th>${cfg.theirLabel}</th>
+          <th>${cfg.myLabel}</th>
           <th>비교</th>
         </tr></thead>
-        <tbody>${rows}</tbody>
+        <tbody id="analysisBody_${type}"></tbody>
       </table>
     </div>
   `;
 }
 
-function drawSupplyChart() {
-  const list = allSkus.filter(s => typeof s.vsSysSupply === 'number').sort((a,b)=>a.vsSysSupply-b.vsSysSupply);
-  new Chart(document.getElementById('supplyChart'), {
-    type: 'bar',
-    data: {
-      labels: list.map(s=>s.name),
-      datasets: [{ label: '시스페이스 공급가 대비 격차 (%)', data: list.map(s=>(s.vsSysSupply*100).toFixed(1)), backgroundColor: list.map(s=>s.vsSysSupply<0?'#1565c0':'#c62828') }]
-    },
-    options: { plugins:{legend:{display:false}}, scales:{x:{ticks:{font:{size:9}}}, y:{beginAtZero:true}} }
+function attachAnalysisHandlers(type) {
+  const cfg = getAnalysisConfig(type);
+  const filter = analysisFilters[type];
+
+  // 카테고리 옵션
+  const cats = [...new Set(allSkus.filter(s => typeof s[cfg.diffKey] === 'number').map(s => s.category))];
+  const catSel = document.getElementById(`analysisCat_${type}`);
+  cats.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c; opt.textContent = `${categoryEmoji[c] || ''} ${c}`;
+    catSel.appendChild(opt);
   });
+  catSel.value = filter.category;
+  document.getElementById(`analysisSort_${type}`).value = filter.sort;
+
+  catSel.addEventListener('change', () => { filter.category = catSel.value; updateAnalysisView(type); });
+  document.getElementById(`analysisSort_${type}`).addEventListener('change', e => { filter.sort = e.target.value; updateAnalysisView(type); });
+
+  updateAnalysisView(type);
 }
 
-// ===== 4. 온라인 판매가 분석 =====
-function renderOnlineAnalysis() {
-  const list = allSkus.filter(s => typeof s.vsCoupang === 'number');
-  const over30 = list.filter(s=>s.vsCoupang>0.3);
-  const rows = [...list].sort((a,b)=>b.vsCoupang-a.vsCoupang).map(s => {
-    const cmp = compareLabel(s.online, s.coupang, '오더앤픽 온라인 판매가', '쿠팡 온라인 판매가');
-    return `<tr>
-      <td class="text-left">${categoryEmoji[s.category]||''} ${s.brand} · ${s.name}</td>
-      <td>${fmt(s.coupang)}</td>
-      <td class="font-medium">${fmt(s.online)}</td>
-      <td>${cmp.html}</td>
-    </tr>`;
-  }).join('');
-  return `
-    <h1 class="text-2xl font-bold text-gray-900 mb-1">온라인 판매가 분석</h1>
-    <p class="text-sm text-gray-500 mb-4">쿠팡 온라인 판매가 대비 오더앤픽 온라인 판매가 비교 — 캠퍼가 캠핏 앱에서 살 만한 가격인가?</p>
+function updateAnalysisView(type) {
+  const cfg = getAnalysisConfig(type);
+  const filter = analysisFilters[type];
 
-    <div class="grid grid-cols-3 gap-4 mb-4">
+  let list = allSkus.filter(s => typeof s[cfg.diffKey] === 'number');
+  if (filter.category) list = list.filter(s => s.category === filter.category);
+
+  // 정렬
+  list.sort((a, b) => {
+    if (filter.sort === 'diff-desc') return b[cfg.diffKey] - a[cfg.diffKey];
+    return a[cfg.diffKey] - b[cfg.diffKey];
+  });
+
+  // 인사이트
+  document.getElementById(`analysisInsight_${type}`).innerHTML = computeInsight(list, cfg);
+
+  // KPI
+  const good = list.filter(s => s[cfg.diffKey] < cfg.threshold).length;
+  const bad = list.filter(s => s[cfg.diffKey] > cfg.threshold).length;
+  document.getElementById(`analysisKpi_${type}`).outerHTML = `
+    <div id="analysisKpi_${type}" class="grid grid-cols-3 gap-4 mb-4">
       ${kpiCard('비교 가능 SKU', list.length+'종', 'gray')}
-      ${kpiCard('쿠팡 대비 30% 이상 비쌈', over30.length+'종', 'rose', '캠퍼 부담 큼 — 검토 필요')}
-      ${kpiCard('쿠팡과 비슷·저렴', (list.length - over30.length)+'종', 'blue', '쿠팡 대비 ≤ 30%')}
-    </div>
-
-    <div class="bg-white p-5 rounded-xl shadow-sm mb-4">
-      <h3 class="font-bold text-gray-900 mb-3">SKU별 쿠팡 대비 격차 (% 높을수록 비쌈)</h3>
-      <canvas id="onlineChart" height="100"></canvas>
-    </div>
-
-    <div class="bg-white rounded-xl shadow-sm overflow-auto">
-      <table class="compare">
-        <thead><tr>
-          <th class="text-left">SKU</th>
-          <th>쿠팡 온라인 판매가</th>
-          <th>오더앤픽 온라인 판매가</th>
-          <th>비교</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      ${kpiCard(cfg.goodLabel, good+'종', 'blue')}
+      ${kpiCard(cfg.badLabel, bad+'종', 'rose')}
     </div>
   `;
-}
 
-function drawOnlineChart() {
-  const list = allSkus.filter(s => typeof s.vsCoupang === 'number').sort((a,b)=>b.vsCoupang-a.vsCoupang);
-  new Chart(document.getElementById('onlineChart'), {
-    type: 'bar',
-    data: {
-      labels: list.map(s=>s.name),
-      datasets: [{ label: '쿠팡 대비 (%)', data: list.map(s=>(s.vsCoupang*100).toFixed(1)), backgroundColor: list.map(s=>s.vsCoupang>0.3?'#c62828':(s.vsCoupang>0?'#ef9a9a':'#1565c0')) }]
-    },
-    options: { plugins:{legend:{display:false}}, scales:{x:{ticks:{font:{size:9}}}, y:{beginAtZero:true}} }
+  // 차트 (현재 필터/정렬 상태 그대로)
+  document.getElementById(`analysisChartTitle_${type}`).textContent = `SKU별 격차 (${list.length}개)`;
+  drawAnalysisChart(type, cfg, list);
+
+  // 테이블
+  const rows = list.map(s => `<tr>
+    <td class="text-left">${categoryEmoji[s.category]||''} ${s.brand} · ${s.core ? '<span class="core-star">★</span>' : ''}${s.name}</td>
+    <td>${fmt(s[cfg.theirKey])}</td>
+    <td class="font-medium">${fmt(s[cfg.myKey])}</td>
+    <td>${compareCell(s[cfg.myKey], s[cfg.theirKey])}</td>
+  </tr>`).join('');
+  document.getElementById(`analysisBody_${type}`).innerHTML = rows;
+  document.querySelectorAll(`#analysisBody_${type} tr`).forEach((tr, idx) => {
+    tr.addEventListener('click', () => showSkuModal(list[idx]));
   });
 }
 
-// ===== 5. 오프라인 판매가 분석 =====
-function renderOfflineAnalysis() {
-  const list = allSkus.filter(s => typeof s.vsSysMSRP === 'number');
-  const over = list.filter(s=>s.vsSysMSRP>0);
-  const rows = [...list].sort((a,b)=>b.vsSysMSRP-a.vsSysMSRP).map(s => {
-    const cmp = compareLabel(s.offline, s.sysMSRP, '오더앤픽 오프라인 판매가', '시스페이스 권장가');
-    return `<tr>
-      <td class="text-left">${categoryEmoji[s.category]||''} ${s.brand} · ${s.name}</td>
-      <td>${fmt(s.sysMSRP)}</td>
-      <td class="font-medium">${fmt(s.offline)}</td>
-      <td>${cmp.html}</td>
-    </tr>`;
-  }).join('');
-  return `
-    <h1 class="text-2xl font-bold text-gray-900 mb-1">오프라인 판매가 분석</h1>
-    <p class="text-sm text-gray-500 mb-4">시스페이스 권장 판매가 대비 오더앤픽 오프라인 판매가 비교 — 캠지기 매점에서 캠퍼가 받는 가격</p>
+// 차트 인스턴스 캐시
+const analysisChartCache = {};
 
-    <div class="grid grid-cols-3 gap-4 mb-4">
-      ${kpiCard('비교 가능 SKU', list.length+'종', 'gray')}
-      ${kpiCard('시스페이스보다 비쌈', over.length+'종', 'rose', '캠퍼 입장 부담')}
-      ${kpiCard('시스페이스 이하', (list.length - over.length)+'종', 'blue', '경쟁력 있음')}
-    </div>
-
-    <div class="bg-white p-5 rounded-xl shadow-sm mb-4">
-      <h3 class="font-bold text-gray-900 mb-3">SKU별 시스페이스 권장가 대비 격차</h3>
-      <canvas id="offlineChart" height="100"></canvas>
-    </div>
-
-    <div class="bg-white rounded-xl shadow-sm overflow-auto">
-      <table class="compare">
-        <thead><tr>
-          <th class="text-left">SKU</th>
-          <th>시스페이스 권장가</th>
-          <th>오더앤픽 오프라인 판매가</th>
-          <th>비교</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
-  `;
-}
-
-function drawOfflineChart() {
-  const list = allSkus.filter(s => typeof s.vsSysMSRP === 'number').sort((a,b)=>b.vsSysMSRP-a.vsSysMSRP);
-  new Chart(document.getElementById('offlineChart'), {
+function drawAnalysisChart(type, cfg, list) {
+  const ctx = document.getElementById(`analysisChart_${type}`);
+  if (analysisChartCache[type]) analysisChartCache[type].destroy();
+  analysisChartCache[type] = new Chart(ctx, {
     type: 'bar',
     data: {
-      labels: list.map(s=>s.name),
-      datasets: [{ label: '시스페이스 권장가 대비 (%)', data: list.map(s=>(s.vsSysMSRP*100).toFixed(1)), backgroundColor: list.map(s=>s.vsSysMSRP>0?'#c62828':'#1565c0') }]
+      labels: list.map(s => s.name),
+      datasets: [{
+        label: `${cfg.theirLabel} 대비 (%)`,
+        data: list.map(s => (s[cfg.diffKey]*100).toFixed(1)),
+        backgroundColor: list.map(s => {
+          if (type === 'online') {
+            return s.vsCoupang > 0.3 ? '#c62828' : (s.vsCoupang > 0 ? '#ef9a9a' : '#1565c0');
+          }
+          return s[cfg.diffKey] > 0 ? '#c62828' : '#1565c0';
+        })
+      }]
     },
-    options: { plugins:{legend:{display:false}}, scales:{x:{ticks:{font:{size:9}}}, y:{beginAtZero:true}} }
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      indexAxis: 'y',
+      plugins: { legend: { display: false } },
+      scales: { x: { beginAtZero: true }, y: { ticks: { font: { size: 11 } } } }
+    }
   });
 }
+
+// 호환용 래퍼
+function renderSupplyAnalysis() { return renderAnalysisPage('supply'); }
+function renderOnlineAnalysis() { return renderAnalysisPage('online'); }
+function renderOfflineAnalysis() { return renderAnalysisPage('offline'); }
+function drawSupplyChart() { attachAnalysisHandlers('supply'); }
+function drawOnlineChart() { attachAnalysisHandlers('online'); }
+function drawOfflineChart() { attachAnalysisHandlers('offline'); }
 
 // ===== 6. 캠핑장 사이즈별 SKU =====
 function renderSizes() {
+  // 사이즈별 SKU 집계
+  const getTierSkus = (tier) => {
+    if (tier === 'S') return allSkus;
+    if (tier === 'A') return allSkus.filter(s => ['B','A'].includes(s.tier));
+    return allSkus.filter(s => s.tier === 'B');
+  };
+  const computeCost = (tier) => {
+    const list = getTierSkus(tier);
+    const received = list.filter(s => typeof s.boxPrice === 'number');
+    const missing = list.length - received.length;
+    const sum = received.reduce((acc, s) => acc + s.boxPrice, 0);
+    return { sum, count: list.length, received: received.length, missing };
+  };
+  const sizeData = { S: computeCost('S'), A: computeCost('A'), B: computeCost('B') };
+  const fmtCost = (n) => n > 0 ? Math.round(n).toLocaleString('ko-KR') + '원' : '미산정';
+
+  const card = (tier, sizeName, bgColor, textColor) => {
+    const d = sizeData[tier];
+    return `
+      <div class="rounded-lg p-3 cursor-pointer hover:opacity-80 transition"
+           style="background:${bgColor};"
+           onclick="showSizeCostModal('${tier}')">
+        <div class="text-xs ${textColor}">${sizeName} 캠핑장 (${d.count}종)</div>
+        <div class="text-xl font-bold mt-1" style="color:${textColor.replace('text-','').replace('-800','').replace('-200','')};">${fmtCost(d.sum)}</div>
+        <div class="text-xs mt-1 ${textColor}">
+          견적 수령 ${d.received}종${d.missing > 0 ? ` · <span class="font-semibold">미수령 ${d.missing}종 제외</span>` : ''}
+        </div>
+        <div class="text-xs text-gray-500 mt-2">▶ 클릭하면 상세 보기</div>
+      </div>`;
+  };
+
   return `
     <h1 class="text-2xl font-bold text-gray-900 mb-1">캠핑장 사이즈별 SKU</h1>
-    <p class="text-sm text-gray-500 mb-4">캠핑장 규모(C 소형 / B 중형 / A 대형)에 맞춰 SKU 필터링</p>
+    <p class="text-sm text-gray-500 mb-4">캠핑장 규모(S 대형 / A 중형 / B 소형)에 맞춰 SKU 필터링</p>
+
+    <section class="bg-white rounded-xl shadow-sm p-4 mb-4">
+      <h3 class="font-bold text-gray-900 mb-2">캠핑장 사이즈별 초기 사입 비용</h3>
+      <p class="text-xs text-gray-500 mb-3">각 사이즈 캠핑장에서 SKU를 한 박스씩 매입 시 예상 비용 (견적 미수령 SKU는 합산 제외)</p>
+      <div class="grid grid-cols-3 gap-3">
+        ${card('S', 'S 대형', '#ffccbc', 'text-orange-800')}
+        ${card('A', 'A 중형', '#fff9c4', 'text-yellow-800')}
+        ${card('B', 'B 소형', '#c8e6c9', 'text-green-800')}
+      </div>
+    </section>
 
     <section class="bg-white rounded-xl shadow-sm p-4 mb-4">
       <div class="flex gap-2 flex-wrap">
@@ -837,6 +1701,11 @@ function renderSizeCards() {
 
   const grid = document.getElementById('cardGrid');
   grid.innerHTML = filtered.map(skuCard).join('');
+  // 카드 클릭 → 모달
+  grid.querySelectorAll('.sku-card').forEach((card, idx) => {
+    card.style.cursor = 'pointer';
+    card.addEventListener('click', () => showSkuModal(filtered[idx]));
+  });
   document.getElementById('emptyState').classList.toggle('hidden', filtered.length>0);
 }
 
@@ -885,7 +1754,7 @@ function skuCard(s) {
       <div class="flex items-start justify-between mb-2">
         <div>
           <div class="text-xs text-gray-500">${emoji} ${s.category} · ${s.brand||''}</div>
-          <div class="font-bold text-gray-900 leading-tight mt-1">${s.name}</div>
+          <div class="font-bold text-gray-900 leading-tight mt-1">${s.core ? '<span class="core-star">★</span>' : ''}${s.name}</div>
           <div class="text-xs text-gray-400 mt-0.5">${s.spec || ''}</div>
         </div>
         ${tierBadges(s.tier)}

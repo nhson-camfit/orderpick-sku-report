@@ -124,8 +124,11 @@
   <!-- 사이드바 -->
   <aside class="w-64 min-h-[calc(100vh-57px)] bg-white border-r border-gray-200 p-4 sticky top-[57px]">
     <nav class="space-y-1">
-      <div class="nav-item active" data-section="camfitcalc">
-        <span class="text-lg">🧮</span><span>캠핏 마진 계산기</span>
+      <div class="nav-item active" data-section="camfitcalc2">
+        <span class="text-lg">🧾</span><span>캠핏 마진 계산기 (서비스 이용료)</span><span class="num">신규</span>
+      </div>
+      <div class="nav-item" data-section="camfitcalc">
+        <span class="text-lg">🧮</span><span>캠핏 마진 계산기 (RS버전)</span><span class="num">구버전</span>
       </div>
       <div class="nav-item" data-section="dashboard">
         <span class="text-lg">📊</span><span>대시보드</span><span class="num">수정중</span>
@@ -149,10 +152,6 @@
         <span class="text-lg">📈</span><span>시뮬레이션</span><span class="num">수정중</span>
       </div>
     </nav>
-    <div class="mt-6 pt-4 border-t border-gray-200 text-xs text-gray-400">
-      <div>마진율 (현재 적용)</div>
-      <div class="mt-2 space-y-1" id="marginInfo">-</div>
-    </div>
   </aside>
 
   <!-- 메인 -->
@@ -167,7 +166,7 @@ let allCounts = {};
 let allMargins = {};
 let allMarginLabels = {};
 let allVendors = [];
-let currentSection = 'camfitcalc';
+let currentSection = 'camfitcalc2';
 let currentTier = 'S';   // 기본 = 대형(전체)
 
 const categoryEmoji = {
@@ -183,7 +182,8 @@ const SECTION_LABELS = {
   offline: '오프라인 판매가 분석',
   sizes: '캠핑장 사이즈별 SKU',
   simulation: '시뮬레이션',
-  camfitcalc: '캠핏 마진 계산기'
+  camfitcalc: '캠핏 마진 계산기 (RS버전)',
+  camfitcalc2: '캠핏 마진 계산기 (서비스 이용료)'
 };
 
 window.showImgFail = function(container, emoji) {
@@ -233,6 +233,8 @@ function hideLoading() {
 }
 
 async function loadData() {
+  // 캠핏 마진 계산기는 시트 데이터가 필요 없으므로 먼저 그리고 로딩도 걷는다 (로드 실패·지연에도 즉시 사용 가능)
+  if (currentSection.startsWith('camfitcalc')) { render(); hideLoading(); }
   if (APPS_SCRIPT_URL.startsWith('YOUR_')) {
     document.getElementById('sectionContainer').innerHTML = '<div class="bg-amber-50 p-6 rounded-xl">⚠️ Apps Script URL 미설정</div>';
     hideLoading();
@@ -253,15 +255,7 @@ async function loadData() {
     allVendors = data.vendors || [];
     document.getElementById('updatedAt').textContent =
       `갱신: ${new Date(data.generatedAt).toLocaleString('ko-KR')}`;
-    document.getElementById('marginInfo').innerHTML = `
-      <div style="display:grid; grid-template-columns: 1fr auto; gap: 8px 10px; line-height: 1.35;">
-        <div>${allMarginLabels.vendorDiscount}</div><div class="font-bold text-gray-700 whitespace-nowrap">${fmtPct(allMargins.vendorDiscount,0)}</div>
-        <div>${allMarginLabels.camfit}</div><div class="font-bold text-gray-700 whitespace-nowrap">${fmtPct(allMargins.camfit,0)}</div>
-        <div>${allMarginLabels.camp}</div><div class="font-bold text-gray-700 whitespace-nowrap">${fmtPct(allMargins.camp,0)}</div>
-        <div>${allMarginLabels.offline}</div><div class="font-bold text-gray-700 whitespace-nowrap">${fmtPct(allMargins.offline,0)}</div>
-      </div>
-    `;
-    render();
+    if (!currentSection.startsWith('camfitcalc')) render();   // 계산기는 이미 그려져 있음 (입력값 유지)
     hideLoading();
   } catch (e) {
     document.getElementById('updatedAt').textContent = `❌ 로드 실패: ${e.message}`;
@@ -278,7 +272,8 @@ function render() {
     offline: renderOfflineAnalysis,
     sizes: renderSizes,
     simulation: renderSimulation,
-    camfitcalc: renderCamfitCalc
+    camfitcalc: renderCamfitCalc,
+    camfitcalc2: renderCamfitCalc2
   };
   const fn = map[currentSection] || renderDashboard;
   document.getElementById('sectionContainer').innerHTML = fn();
@@ -290,6 +285,7 @@ function render() {
   if (currentSection === 'sizes') attachSizesHandlers();
   if (currentSection === 'simulation') attachSimulationHandlers();
   if (currentSection === 'camfitcalc') attachCamfitCalcHandlers();
+  if (currentSection === 'camfitcalc2') attachCamfitCalc2Handlers();
 }
 
 // ===== 1. 대시보드 =====
@@ -1822,43 +1818,60 @@ function renderQuotes() {
 // ===== 캠핏 마진 계산기 (오더앤픽 거래액 모델 — 시트 연동 없음) =====
 const calcState = {
   camps: 50, pg: 3.3,                                          // 공통
-  deliverPerCamp: 3000000, b2bRate: 10,                        // 납품(B2B) 비즈니스
+  deliverPerCamp: 3000000, b2bRate: 10, b2bPay: 'transfer',    // 납품(B2B) 비즈니스 · b2bPay: transfer=계좌이체(PG 없음) / card=카드·PG
   avgSpend: 30000, resv: 100, adopt: 20, online: 15, rs: 5     // 오더앤픽 온라인 (RS 2026-07-24 확정)
 };
 
 function renderCamfitCalc() {
   const s = calcState;
-  const inp = (id, label, val, step, suffix) =>
-    `<div>
+  // suffix가 %가 아니면 금액·수량 → 콤마 표시(text 입력)
+  const inp = (id, label, val, step, suffix) => {
+    const money = suffix !== '%';
+    const attrs = money
+      ? `type="text" inputmode="numeric" value="${fmtNum(val)}"`
+      : `type="number" step="${step}" value="${val}"`;
+    return `<div>
        <label class="block text-xs text-gray-500 mb-1">${label}</label>
        <div class="relative">
-         <input id="${id}" type="number" step="${step}" value="${val}" class="w-full border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm" />
+         <input id="${id}" ${attrs} class="w-full border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm${money?' tabular-nums':''}" />
          <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">${suffix}</span>
        </div>
      </div>`;
+  };
+  const sel = (id, label, val, opts) =>
+    `<div>
+       <label class="block text-xs text-gray-500 mb-1">${label}</label>
+       <select id="${id}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+         ${opts.map(o => `<option value="${o[0]}" ${val===o[0]?'selected':''}>${o[1]}</option>`).join('')}
+       </select>
+     </div>`;
   return `
-    <h1 class="text-2xl font-bold text-gray-900 mb-1">캠핏 마진 계산기</h1>
+    <h1 class="text-2xl font-bold text-gray-900 mb-1">캠핏 마진 계산기 <span class="text-base font-semibold text-gray-400">(RS버전)</span></h1>
     <p class="text-sm text-gray-500 mb-4">납품(B2B) 비즈니스와 오더앤픽 온라인 정산을 <b>따로</b> 계산하고, 합쳐서 캠핏 총 마진을 봅니다 (시트 연동 없음). RS·PG 기본값은 2026-07-24 확정 기준.</p>
+    <p class="text-xs text-gray-500 mb-4 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">💡 <b>모든 금액은 VAT 포함 기준</b>입니다 — 납품금액·구매금액·거래액 전부 부가세가 포함된 금액을 입력하세요.</p>
 
     <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
       <h3 class="font-bold text-gray-900 mb-3">📥 공통</h3>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         ${inp('ccCamps','캠핑장 수', s.camps, 1, '곳')}
-        ${inp('ccPg','PG 수수료', s.pg, 0.1, '%')}
+        ${inp('ccPg','PG 수수료율', s.pg, 0.1, '%')}
       </div>
+      <p class="text-xs text-gray-400 mt-2">※ PG는 <b>캠핏 부담</b>(중개수수료에 포함) — 캠핑장에 따로 청구하지 않습니다.</p>
 
       <h3 class="font-bold text-gray-900 mt-5 mb-3">📦 납품(B2B) 비즈니스</h3>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         ${inp('ccDeliver','캠핑장당 월 납품금액', s.deliverPerCamp, 100000, '원')}
-        ${inp('ccB2bRate','캠핏 납품 마진율', s.b2bRate, 1, '%')}
+        ${inp('ccB2bRate','캠핏 납품 마진율 (납품가 대비)', s.b2bRate, 1, '%')}
+        ${sel('ccB2bPay','납품대금 결제방식', s.b2bPay, [['transfer','계좌이체 (PG 없음)'],['card','카드·PG 결제']])}
       </div>
+      <p class="text-xs mt-2" style="color:#b45309;">⚠️ 납품대금 결제방식 = <b>윤대표님 확인 대기</b>. 계좌이체면 PG 미적용, 카드면 PG 수수료율만큼 차감됩니다.</p>
 
       <h3 class="font-bold text-gray-900 mt-5 mb-3">🛒 오더앤픽 온라인</h3>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         ${inp('ccSpend','캠퍼 평균 구매금액', s.avgSpend, 1000, '원')}
         ${inp('ccResv','캠핑장 월 평균 예약건수', s.resv, 10, '건')}
         ${inp('ccAdopt','오더앤픽 이용률', s.adopt, 1, '%')}
-        ${inp('ccOnline','납품가→온라인 판매가 마진', s.online, 1, '%')}
+        ${inp('ccOnline','온라인 판매가 마진율 (납품가 대비)', s.online, 1, '%')}
         ${inp('ccRs','캠핑장 RS 수수료', s.rs, 0.5, '%')}
       </div>
     </section>
@@ -1869,14 +1882,23 @@ function renderCamfitCalc() {
 
 function attachCamfitCalcHandlers() {
   const map = {ccCamps:'camps',ccPg:'pg',ccDeliver:'deliverPerCamp',ccB2bRate:'b2bRate',ccSpend:'avgSpend',ccResv:'resv',ccAdopt:'adopt',ccOnline:'online',ccRs:'rs'};
+  const sync = () => {
+    Object.entries(map).forEach(([k,v]) => {
+      const el = document.getElementById(k);
+      if (el) calcState[v] = parseNum(el.value);
+    });
+    const pay = document.getElementById('ccB2bPay');
+    if (pay) calcState.b2bPay = pay.value;
+    updateCamfitCalc();
+  };
   Object.keys(map).forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.addEventListener('input', () => {
-      Object.entries(map).forEach(([k,v]) => { calcState[v] = parseFloat(document.getElementById(k).value) || 0; });
-      updateCamfitCalc();
-    });
+    if (el) el.addEventListener('input', sync);
   });
-  updateCamfitCalc();
+  const pay = document.getElementById('ccB2bPay');
+  if (pay) pay.addEventListener('change', sync);
+  attachNumFormat(['ccCamps','ccDeliver','ccSpend','ccResv']);
+  sync();   // 브라우저 새로고침 시 입력칸 값이 복원될 수 있으므로 DOM → state로 먼저 맞춘다
 }
 
 function updateCamfitCalc() {
@@ -1884,7 +1906,8 @@ function updateCamfitCalc() {
   // A. 납품(B2B) 비즈니스 (독립)
   const deliverTot = s.deliverPerCamp * s.camps;        // 납품 총액
   const b2bGross   = deliverTot * s.b2bRate/100;        // 캠핏 납품 마진(gross)
-  const b2bPg      = deliverTot * s.pg/100;             // 납품 결제 PG
+  const b2bCard    = s.b2bPay === 'card';               // 납품대금 카드·PG 결제 여부
+  const b2bPg      = b2bCard ? deliverTot * s.pg/100 : 0;  // 납품 결제 PG (계좌이체면 0)
   const b2bCost    = deliverTot - b2bGross;             // 원가·기타
   const b2bNet     = b2bGross - b2bPg;                  // 캠핏 납품 마진(순)
 
@@ -1894,26 +1917,29 @@ function updateCamfitCalc() {
   const rsAmt   = GMV * s.rs/100;                       // 캠핑장 RS
   const onPg    = GMV * s.pg/100;                       // 온라인 PG
   const onNet   = GMV - deliver - rsAmt - onPg;         // 캠핏 온라인 마진
+  const useRate = deliverTot > 0 ? (deliver/deliverTot)*100 : 0;  // 온라인 소진율 (납품 재고 중 온라인으로 나가는 비중)
 
   const total = b2bNet + onNet;                         // 캠핏 총 마진
 
   const won = n => Math.round(n).toLocaleString('ko-KR') + '원';
   const pct = (n,base) => base>0 ? ((n/base)*100).toFixed(1)+'%' : '-';
-  const seg = (val,base,color) => (base>0 && val>0) ? `<div style="width:${(val/base)*100}%;background:${color};" class="h-full"></div>` : '';
+  const seg = (val,base,color) => (base>0 && val>0) ? `<div style="width:${Math.min(100,(val/base)*100)}%;background:${color};" class="h-full"></div>` : '';
+  const warn = msg => `<p class="text-xs mt-2" style="color:#b91c1c;">⚠️ ${msg}</p>`;
   const chip = (color,label,val,base) => `<span><span class="inline-block w-3 h-3 rounded-sm align-middle mr-1" style="background:${color}"></span>${label} ${won(val)} · ${pct(val,base)}</span>`;
 
   document.getElementById('calcResult').innerHTML = `
     <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
       <h3 class="font-bold text-gray-900 mb-1">📦 납품(B2B) 비즈니스</h3>
-      <p class="text-xs text-gray-500 mb-3">캠핑장당 납품금액 × 캠핑장 수 = 납품 총액 → 캠핏 마진율 − PG</p>
+      <p class="text-xs text-gray-500 mb-3">캠핑장당 납품금액 × 캠핑장 수 = 납품 총액 → 캠핏 마진율 ${b2bCard ? '− PG' : ''} · 결제 <b>${b2bCard ? '카드·PG' : '계좌이체(PG 없음)'}</b></p>
       <div class="flex h-7 rounded-lg overflow-hidden border border-gray-200">
         ${seg(b2bCost,deliverTot,'#9ca3af')}${seg(b2bPg,deliverTot,'#f472b6')}${seg(b2bNet,deliverTot,'#7c3aed')}
       </div>
       <div class="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs text-gray-700">
         ${chip('#9ca3af','원가·기타',b2bCost,deliverTot)}
-        ${chip('#f472b6','B2B PG',b2bPg,deliverTot)}
+        ${b2bCard ? chip('#f472b6','B2B PG',b2bPg,deliverTot) : ''}
         ${chip('#7c3aed','캠핏 납품 마진',b2bNet,deliverTot)}
       </div>
+      ${b2bNet < 0 ? warn('납품 마진율이 PG 수수료율보다 낮아 납품 마진이 <b>마이너스</b>입니다.') : ''}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
         <div class="rounded-xl p-4" style="background:#f3e8ff;">
           <div class="text-xs text-purple-700 font-semibold">캠핏 납품 마진 (월)</div>
@@ -1927,7 +1953,9 @@ function updateCamfitCalc() {
         </div>
       </div>
       <div class="mt-3 text-xs text-gray-600 font-mono bg-gray-50 rounded p-3">
-        캠핏 납품 마진 = 납품 총액 × 마진율 − PG = ${won(deliverTot)} × ${s.b2bRate}% − ${won(b2bPg)} = <b>${won(b2bNet)}</b>
+        ${b2bCard
+          ? `캠핏 납품 마진 = 납품 총액 × 마진율 − PG = ${won(deliverTot)} × ${s.b2bRate}% − ${won(b2bPg)} = <b>${won(b2bNet)}</b>`
+          : `캠핏 납품 마진 = 납품 총액 × 마진율 = ${won(deliverTot)} × ${s.b2bRate}% = <b>${won(b2bNet)}</b>`}
       </div>
     </section>
 
@@ -1943,6 +1971,11 @@ function updateCamfitCalc() {
         ${chip('#f472b6','온라인 PG',onPg,GMV)}
         ${chip('#2563eb','캠핏 온라인 마진',onNet,GMV)}
       </div>
+      <p class="text-xs text-gray-500 mt-2">
+        온라인 소진율 <b>${useRate.toFixed(1)}%</b> — 납품 총액 ${won(deliverTot)} 중 ${won(deliver)} 어치가 온라인으로 판매됩니다 (나머지는 매점 오프라인 판매).
+      </p>
+      ${useRate > 100 ? warn('온라인 판매분이 <b>납품 총액을 초과</b>합니다. 캠핑장당 납품금액을 올리거나 이용률·예약건수를 낮춰 주세요.') : ''}
+      ${onNet < 0 ? warn('온라인 마진율이 RS+PG보다 낮아 캠핏 온라인 마진이 <b>마이너스</b>입니다.') : ''}
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
         <div class="rounded-xl p-4" style="background:#e3f2fd;">
           <div class="text-xs text-blue-700 font-semibold">캠핏 온라인 마진 (월)</div>
@@ -1959,6 +1992,594 @@ function updateCamfitCalc() {
       <div class="mt-3 text-xs text-gray-600 font-mono bg-gray-50 rounded p-3">
         캠핏 온라인 마진 = 거래액 − 납품가 − RS − 온라인 PG = ${won(GMV)} − ${won(deliver)} − ${won(rsAmt)} − ${won(onPg)} = <b>${won(onNet)}</b>
       </div>
+    </section>
+
+    <section class="rounded-xl shadow-sm p-5 mb-4" style="background:linear-gradient(135deg,#1e3a8a,#312e81);color:#fff;">
+      <div class="text-sm" style="opacity:.85;">캠핏 총 마진 (📦 납품 + 🛒 온라인, 월)</div>
+      <div class="text-3xl font-extrabold mt-1">${won(total)}</div>
+      <div class="text-sm mt-2" style="opacity:.9;">납품 ${won(b2bNet)} + 온라인 ${won(onNet)} · 연 ${won(total*12)}</div>
+    </section>
+  `;
+}
+
+// ===== 캠핏 마진 계산기 (서비스 이용료) — 숙소셀러 RS 폐지 버전 (2026-07-30 회의 반영) =====
+const calcState2 = {
+  camps: 50, pg: 3.3,                                          // 공통
+  deliverPerCamp: 3000000, b2bRate: 10, b2bPay: 'transfer',    // 납품(B2B) — RS버전과 동일
+  avgSpend: 30000, resv: 100, adopt: 20,                       // 오더앤픽 온라인 (거래액 산출)
+  campMargin: 5,                                               // 캠핑장 마진율 (납품가 대비) — 단가 블록과 공유
+  // 확정 산식(2026-07-30·31): 판매가에서 서비스 이용료 공제 → 캠핑장 정산. uRound 2=올림(캠핑장 마진 ≥ 목표 보장)
+  uSupply: 1000, uOpFee: 8, uRound: 2,
+  uMode: 'margin', uUpRate: 14.13,
+  // 일반셀러(신선·직배) — B2B 납품 없음, 캠핑장은 보관비(RS)만 수취
+  gSupply: 1000, gOpFee: 13, gRs: 5, gRound: 2   // uMode: margin=캠핑장 마진율 입력 / up=업률 입력(캠핑장 마진이 결과)
+  // ※ 「온라인 판매가 마진율」은 입력이 아니라 결과값 = (1+campMargin) ÷ (1−uOpFee) − 1
+};
+
+// 숫자 입력칸 콤마 표시용 (type=number는 콤마를 못 그려서 text로 받고 직접 포맷)
+const fmtNum   = n => (isFinite(n) ? Number(n).toLocaleString('ko-KR') : '');
+const parseNum = v => parseFloat(String(v).replace(/,/g, '')) || 0;
+// 금액·수량 입력칸에 콤마를 붙이고, 편집 중에는 계산만 갱신 → 포커스 아웃 때 다시 포맷
+function attachNumFormat(ids) {
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.numFmt) return;
+    el.dataset.numFmt = '1';
+    el.addEventListener('blur', () => { el.value = fmtNum(parseNum(el.value)); });
+  });
+}
+
+// 판매가 10원 단위 처리.  1=반올림(사사오입) / 2=올림(캠핑장 마진이 목표 이상 보장) / 0=미적용
+function r10(x, mode) {
+  if (mode === 2) return Math.ceil(x/10) * 10;
+  if (mode === 0) return x;
+  return Math.floor(x/10 + 0.5) * 10;
+}
+
+function renderCamfitCalc2() {
+  const s = calcState2;
+  // suffix가 %가 아니면 금액·수량 → 콤마 표시(text 입력)
+  const inp = (id, label, val, step, suffix) => {
+    const money = suffix !== '%';
+    const attrs = money
+      ? `type="text" inputmode="numeric" value="${fmtNum(val)}"`
+      : `type="number" step="${step}" value="${val}"`;
+    return `<div>
+       <label class="block text-xs text-gray-500 mb-1">${label}</label>
+       <div class="relative">
+         <input id="${id}" ${attrs} class="w-full border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm${money?' tabular-nums':''}" />
+         <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">${suffix}</span>
+       </div>
+     </div>`;
+  };
+  const sel = (id, label, val, opts) =>
+    `<div>
+       <label class="block text-xs text-gray-500 mb-1">${label}</label>
+       <select id="${id}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+         ${opts.map(o => `<option value="${o[0]}" ${val===o[0]?'selected':''}>${o[1]}</option>`).join('')}
+       </select>
+     </div>`;
+  return `
+    <h1 class="text-2xl font-bold text-gray-900 mb-1">캠핏 마진 계산기 <span class="text-base font-semibold text-gray-400">(서비스 이용료)</span></h1>
+    <p class="text-sm text-gray-500 mb-4"><b>숙소셀러 RS 폐지</b> 구조(2026-07-30 회의 결정). 캠핑장 마진은 <b>납품가에 얹어 오더앤픽 공급가</b>로 확정하고, <b>판매가에서 서비스 이용료를 공제</b>해 정산합니다. 시트 연동 없음.</p>
+    <p class="text-xs text-gray-500 mb-4 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">💡 <b>모든 금액은 VAT 포함 기준</b>입니다 — 납품금액·구매금액·거래액 전부 부가세가 포함된 금액을 입력하세요.</p>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4" style="border:2px solid #7c3aed;">
+      <h3 class="font-bold text-gray-900 mb-1">🧪 숙소셀러 상품 판매가 시뮬레이터 <span class="text-xs font-normal text-purple-700">2026-07-30 확정 산식</span></h3>
+      <p class="text-xs text-gray-500 mb-3">숙소셀러(캠지기)가 매입해 파는 상품 <b>1개</b> 기준. <b>판매가에서 서비스 이용료를 공제</b>한 나머지가 <b>캠핑장 정산가</b>(= 캠핑장 납품가 + 캠핑장 마진)입니다.</p>
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+        ${inp('c2uSupply','공급사 공급가', s.uSupply, 100, '원')}
+        ${inp('c2uB2b','캠핏 납품 마진율 (공급가 대비)', s.b2bRate, 1, '%')}
+        ${s.uMode === 'up'
+          ? inp('c2uUpRate','납품가 대비 판매가 (업률)', s.uUpRate, 0.5, '%')
+          : inp('c2uCampMargin','캠핑장 마진율 (납품가 대비)', s.campMargin, 0.5, '%')}
+        ${inp('c2uOpFee','서비스 이용료율 (판매가 공제)', s.uOpFee, 0.5, '%')}
+        ${inp('c2uPg','PG 수수료율', s.pg, 0.1, '%')}
+        ${sel('c2uRound','판매가 10원 단위 처리', String(s.uRound), [['2','올림 (캠핑장 마진 ≥ 목표)'],['1','반올림 (사사오입)'],['0','미적용 (정확히 목표 %)']])}
+        ${sel('c2uMode','입력 방식', s.uMode, [['margin','캠핑장 마진율 → 판매가 산출'],['up','업률(판매가) → 캠핑장 마진 산출']])}
+      </div>
+      <div id="calc2Unit" class="mt-4"></div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4" style="border:2px solid #0d9488;">
+      <h3 class="font-bold text-gray-900 mb-1">🧊 일반셀러 상품 판매가 시뮬레이터 <span class="text-xs font-normal" style="color:#0f766e;">신선·직배</span></h3>
+      <p class="text-xs text-gray-500 mb-3">일반셀러(참연 등)가 <b>캠퍼에게 직접 판매·배송</b>하는 상품 1개 기준. 캠핑장은 재고를 사지 않고 <b>보관·픽업 대가(RS)</b>만 받습니다. 그래서 <b>납품(B2B) 단계가 없습니다</b>.</p>
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+        ${inp('c2gSupply','공급사(일반셀러) 공급가', s.gSupply, 100, '원')}
+        ${inp('c2gOpFee','서비스 이용료율 (판매가 공제)', s.gOpFee, 0.5, '%')}
+        ${inp('c2gPg','PG 수수료율', s.pg, 0.1, '%')}
+        ${inp('c2gRs','캠핑장 보관비 (RS)', s.gRs, 0.5, '%')}
+        ${sel('c2gRound','판매가 10원 단위 처리', String(s.gRound), [['2','올림'],['1','반올림'],['0','미적용']])}
+      </div>
+      <p class="text-xs mt-2" style="color:#0f766e;">※ <b>서비스 이용료 안에 PG + 캠핑장 보관비(RS) + 캠핏이익금</b>이 모두 들어 있습니다 → 손익분기 = PG + RS.</p>
+      <div id="calc2Gen" class="mt-4"></div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <h3 class="font-bold text-gray-900 mb-3">📥 공통</h3>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        ${inp('c2Camps','캠핑장 수', s.camps, 1, '곳')}
+        ${inp('c2Pg','PG 수수료율', s.pg, 0.1, '%')}
+      </div>
+      <p class="text-xs text-gray-400 mt-2">※ PG는 <b>캠핏 부담</b>(서비스 이용료에 포함) — 캠핑장에 따로 청구하지 않습니다.</p>
+
+      <h3 class="font-bold text-gray-900 mt-5 mb-3">📦 납품(B2B) 비즈니스</h3>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        ${inp('c2Deliver','캠핑장당 월 납품금액', s.deliverPerCamp, 100000, '원')}
+        ${inp('c2B2bRate','캠핏 납품 마진율 (납품가 대비)', s.b2bRate, 1, '%')}
+        ${sel('c2B2bPay','납품대금 결제방식', s.b2bPay, [['transfer','계좌이체 (PG 없음)'],['card','카드·PG 결제']])}
+      </div>
+      <p class="text-xs mt-2" style="color:#b45309;">⚠️ 납품대금 결제방식 = <b>윤대표님 확인 대기</b>. 계좌이체면 PG 미적용, 카드면 PG 수수료율만큼 차감됩니다.</p>
+
+      <h3 class="font-bold text-gray-900 mt-5 mb-3">🛒 오더앤픽 온라인 <span class="text-xs font-normal" style="color:#dc2626;">RS 없음</span></h3>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        ${inp('c2Spend','캠퍼 평균 구매금액', s.avgSpend, 1000, '원')}
+        ${inp('c2Resv','캠핑장 월 평균 예약건수', s.resv, 10, '건')}
+        ${inp('c2Adopt','오더앤픽 이용률', s.adopt, 1, '%')}
+        ${s.uMode === 'up'
+          ? `<div>
+               <label class="block text-xs text-gray-500 mb-1">캠핑장 마진율 (납품가 대비)</label>
+               <div class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm bg-gray-50 text-gray-700 flex items-center justify-between">
+                 <span class="font-semibold">${(((1+s.uUpRate/100)*(1-s.uOpFee/100))-1).toFixed(4)*1 ? ((((1+s.uUpRate/100)*(1-s.uOpFee/100))-1)*100).toFixed(2) : '0.00'}</span>
+                 <span class="text-xs text-gray-400">% · 업률에서 자동</span>
+               </div>
+             </div>`
+          : inp('c2CampMargin','캠핑장 마진율 (납품가 대비)', s.campMargin, 0.5, '%')}
+        ${inp('c2OpFee','서비스 이용료율 (판매가 공제)', s.uOpFee, 0.5, '%')}
+      </div>
+      <p class="text-xs mt-2" style="color:#6b7280;">※ <b>「온라인 판매가 마진율」은 입력이 아니라 결과값</b>입니다 — 캠핑장 마진율과 서비스 이용료율이 정해지면 자동으로 결정됩니다 <span class="font-mono">(1+캠핑장마진) ÷ (1−서비스 이용료) − 1</span>.</p>
+    </section>
+
+    <div id="calc2Result"></div>
+  `;
+}
+
+function attachCamfitCalc2Handlers() {
+  // 일부 항목(b2bRate·campMargin·pg)은 단가 시뮬레이터와 입력칸을 공유한다 → 한쪽을 고치면 다른 쪽도 갱신
+  const map = {c2Camps:'camps',c2Pg:'pg',c2Deliver:'deliverPerCamp',c2B2bRate:'b2bRate',c2Spend:'avgSpend',c2Resv:'resv',c2Adopt:'adopt',c2CampMargin:'campMargin',c2OpFee:'uOpFee',
+               c2uSupply:'uSupply',c2uB2b:'b2bRate',c2uCampMargin:'campMargin',c2uOpFee:'uOpFee',c2uPg:'pg',c2uUpRate:'uUpRate',
+               c2gSupply:'gSupply',c2gOpFee:'gOpFee',c2gPg:'pg',c2gRs:'gRs'};
+  const sync = (ev) => {
+    const srcId = ev && ev.target ? ev.target.id : null;
+    if (srcId && map[srcId]) {
+      calcState2[map[srcId]] = parseNum(document.getElementById(srcId).value);
+    } else {
+      Object.entries(map).forEach(([k,v]) => {
+        const el = document.getElementById(k);
+        if (el) calcState2[v] = parseNum(el.value);
+      });
+    }
+    // 같은 값을 쓰는 반대편 입력칸에 반영 (편집 중인 칸은 건드리지 않음 — 커서 튐 방지)
+    Object.entries(map).forEach(([k,v]) => {
+      if (k === srcId) return;
+      const el = document.getElementById(k);
+      if (!el) return;
+      const isMoney = el.type === 'text';
+      const shown = isMoney ? fmtNum(calcState2[v]) : String(calcState2[v]);
+      if (el.value !== shown) el.value = shown;
+    });
+    const pay = document.getElementById('c2B2bPay');
+    if (pay) calcState2.b2bPay = pay.value;
+    const rnd = document.getElementById('c2uRound');
+    if (rnd) calcState2.uRound = parseInt(rnd.value, 10);
+    const grd = document.getElementById('c2gRound');
+    if (grd) calcState2.gRound = parseInt(grd.value, 10);
+    const md = document.getElementById('c2uMode');
+    if (md && md.value !== calcState2.uMode) { calcState2.uMode = md.value; render(); return; }
+    updateCamfitCalc2();
+  };
+  Object.keys(map).forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', sync);
+  });
+  ['c2B2bPay','c2uRound','c2uMode','c2gRound'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', sync);
+  });
+  attachNumFormat(['c2uSupply','c2gSupply','c2Camps','c2Deliver','c2Spend','c2Resv']);
+  sync();   // 새로고침 시 DOM에 남은 값을 state로 먼저 맞춘다 (RS버전과 동일)
+}
+
+// 일반셀러(신선·직배) 판매가 시뮬레이터 — B2B 납품 없음 / 캠핑장은 보관비(RS)만
+function updateCalc2General() {
+  const s = calcState2;
+  const box = document.getElementById('calc2Gen');
+  if (!box) return;
+
+  const b   = s.gOpFee/100;
+  const sup = s.gSupply;                              // 일반셀러 공급가 = 셀러 정산 목표
+  const rawP = b < 1 ? sup/(1-b) : 0;                 // 판매가(자릿수 처리 전)
+  const price = r10(rawP, s.gRound);
+  const RM = {2:'올림', 1:'반올림', 0:'미적용'}[s.gRound] || '올림';
+
+  const fee    = price * b;                           // 서비스 이용료 (정확)
+  const settle = price - fee;                         // 일반셀러 정산액
+  const pg     = price * s.pg/100;
+  const rsAmt  = price * s.gRs/100;                   // 캠핑장 보관비
+  const camfit = fee - pg - rsAmt;                    // 캠핏이익금 = 잔여
+  const be     = s.pg + s.gRs;                        // 손익분기 서비스 이용료율
+
+  const C = {sup:'#6b7280', camfit:'#0d9488', camp:'#ea580c', price:'#2563eb', pg:'#db2777'};
+  const w  = n => (Math.round(n*100)/100).toLocaleString('ko-KR') + '원';
+  const w0 = n => Math.round(n).toLocaleString('ko-KR') + '원';
+  const seg = (v,base,c) => (base>0 && v>0) ? `<div style="width:${Math.min(100,(v/base)*100)}%;background:${c};" class="h-full"></div>` : '';
+  const warn = m => `<p class="text-xs mt-2" style="color:#b91c1c;">⚠️ ${m}</p>`;
+  const step = (no,label,formula,amount,color,sub,pctW) => `
+    <div class="flex items-center gap-3 py-2.5">
+      <div class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold text-white leading-none" style="background:${color};">${no}</div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-baseline justify-between gap-3">
+          <div class="text-sm font-semibold text-gray-800 truncate">${label}</div>
+          <div class="text-lg font-bold tabular-nums shrink-0" style="color:${color};">${amount}</div>
+        </div>
+        <div class="h-1.5 rounded-full mt-1.5" style="background:#e5e7eb;"><div class="h-full rounded-full" style="width:${pctW}%;background:${color};opacity:.55;"></div></div>
+        <div class="flex items-baseline justify-between gap-3 mt-1">
+          <div class="text-[11px] font-mono text-gray-400 truncate">${formula}</div>
+          <div class="text-[11px] shrink-0" style="color:${color};">${sub}</div>
+        </div>
+      </div>
+    </div>`;
+  const leaf = (depth,label,amount,color,note,strong) => `
+    <div class="flex items-center gap-2 py-1.5" style="padding-left:${depth*22}px;">
+      ${depth ? `<span class="text-gray-300 font-mono text-xs shrink-0">└</span>` : ''}
+      <span class="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style="background:${color};"></span>
+      <span class="text-xs ${strong?'font-bold text-gray-900':'text-gray-600'} shrink-0">${label}</span>
+      <span class="flex-1 border-b border-dotted border-gray-200 mx-1"></span>
+      <span class="text-sm ${strong?'font-bold':'font-semibold'} tabular-nums shrink-0" style="color:${color};">${amount}</span>
+      ${note ? `<span class="text-[11px] text-gray-400 shrink-0 w-20 text-right">${note}</span>` : '<span class="w-20 shrink-0"></span>'}
+    </div>`;
+
+  box.innerHTML = `
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="rounded-xl border border-gray-200 p-4">
+        <div class="text-sm font-bold text-gray-900 mb-1">가격이 만들어지는 과정</div>
+        <div class="text-[11px] text-gray-500 mb-2">공급가에서 서비스 이용료만큼 역산하면 끝 — 2단계</div>
+        <div class="divide-y divide-gray-100">
+          ${step(1,'공급사(일반셀러) 공급가','셀러가 받아야 할 금액', w0(sup), C.sup, '', sup/(price||1)*100)}
+          ${step(2,'온라인 판매가', `공급가 ÷ (1 − ${s.gOpFee}%)${s.gRound?` → 10원 ${RM}`:''}`, s.gRound?w0(price):w(price), C.price, s.gRound?`${w(rawP)} ${RM}`:'', 100)}
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-gray-200 p-4">
+        <div class="text-sm font-bold text-gray-900 mb-1">캠퍼가 낸 ${w0(price)}이 나뉘는 과정</div>
+        <div class="text-[11px] text-gray-500 mb-2">서비스 이용료 하나가 3갈래로</div>
+        <div class="rounded-lg px-3 py-2 mb-1 flex items-center justify-between" style="background:#eff6ff;">
+          <span class="text-xs font-bold" style="color:#1d4ed8;">캠퍼 결제</span>
+          <span class="text-lg font-bold tabular-nums" style="color:${C.price};">${w0(price)}</span>
+        </div>
+        ${leaf(1,'서비스 이용료', w(fee), C.camfit, `${s.gOpFee}%`, true)}
+        ${leaf(2,'PG', w(pg), C.pg, `${s.pg}%`, false)}
+        ${leaf(2,'캠핑장 보관비(RS)', w(rsAmt), C.camp, `${s.gRs}%`, true)}
+        ${leaf(2,'캠핏이익금', w(camfit), C.camfit, `${(camfit/price*100).toFixed(2)}%`, true)}
+        ${leaf(1,'일반셀러 정산', w(settle), C.sup, `${(settle/price*100).toFixed(1)}%`, true)}
+      </div>
+    </div>
+
+    <div class="mt-4 rounded-xl p-4" style="background:#f9fafb;border:1px solid #e5e7eb;">
+      <div class="text-xs font-bold text-gray-700 mb-3">결국 이 상품 1개에서 누가 얼마를 갖나 <span class="font-normal text-gray-400">(판매가 ${w0(price)} 기준)</span></div>
+      <div class="flex h-8 rounded-lg overflow-hidden border border-gray-200 mb-3">
+        ${seg(settle,price,'#d1d5db')}${seg(rsAmt,price,C.camp)}${seg(pg,price,C.pg)}${seg(camfit,price,C.camfit)}
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div class="rounded-lg p-3" style="background:#f0fdfa;">
+          <div class="text-[11px] font-semibold" style="color:${C.camfit};">캠핏이익금</div>
+          <div class="text-lg font-bold tabular-nums whitespace-nowrap" style="color:#115e59;">${w(camfit)}</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">서비스 이용료 − PG − 보관비</div>
+          <div class="text-[11px] text-gray-500">판매가의 ${(camfit/price*100).toFixed(2)}%</div>
+        </div>
+        <div class="rounded-lg p-3" style="background:#fff7ed;">
+          <div class="text-[11px] font-semibold" style="color:${C.camp};">캠핑장 보관비</div>
+          <div class="text-lg font-bold tabular-nums whitespace-nowrap" style="color:#9a3412;">${w(rsAmt)}</div>
+          <div class="text-[11px] text-orange-700 mt-0.5">재고 매입 없음 · 보관·픽업 대가</div>
+          <div class="text-[11px] text-gray-500">판매가의 ${s.gRs}%</div>
+        </div>
+        <div class="rounded-lg p-3" style="background:#fdf2f8;">
+          <div class="text-[11px] font-semibold" style="color:${C.pg};">PG사</div>
+          <div class="text-lg font-bold tabular-nums whitespace-nowrap" style="color:#9d174d;">${w(pg)}</div>
+          <div class="text-[11px] text-pink-700 mt-0.5">캠핏 부담</div>
+          <div class="text-[11px] text-gray-500">판매가의 ${s.pg}%</div>
+        </div>
+        <div class="rounded-lg p-3" style="background:#f3f4f6;">
+          <div class="text-[11px] font-semibold text-gray-600">일반셀러</div>
+          <div class="text-lg font-bold tabular-nums whitespace-nowrap text-gray-700">${w(settle)}</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">공급가 회수</div>
+          <div class="text-[11px] text-gray-500">판매가의 ${(settle/price*100).toFixed(2)}%</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-3 rounded-lg px-3 py-2 text-xs" style="background:${s.gOpFee>=be?'#f0fdf4':'#fef2f2'};color:${s.gOpFee>=be?'#15803d':'#b91c1c'};">
+      손익분기 서비스 이용료율 = PG ${s.pg}% + 보관비 ${s.gRs}% = <b>${be.toFixed(2)}%</b> · 현재 <b>${s.gOpFee}%</b> → ${s.gOpFee>=be?'✅ 흑자권':'❌ 적자'}
+      <span style="color:#6b7280;"> · 숙소셀러는 RS가 없어 손익분기가 PG(${s.pg}%)뿐이지만, 일반셀러는 보관비까지 덮어야 합니다.</span>
+    </div>
+    ${camfit < 0 ? warn(`서비스 이용료 ${s.gOpFee}%가 <b>PG + 보관비(${be.toFixed(2)}%)</b>에 못 미쳐 캠핏이익금이 마이너스입니다.`) : ''}
+  `;
+}
+
+// 단가 시뮬레이터 — 판매가에서 서비스 이용료 공제 → 캠핑장 정산 (2026-07-30 확정)
+function updateCalc2Unit() {
+  const s = calcState2;
+  const box = document.getElementById('calc2Unit');
+  if (!box) return;
+
+  const b      = s.uOpFee / 100;                       // 서비스 이용료율 (판매가를 정하는 계수)
+  const supply = s.uSupply;                            // 공급사 공급가
+  const deliv  = supply * (1 + s.b2bRate/100);         // 캠핑장 납품가
+  // ★ 서비스 이용료율을 고정한다 — 약관·정산서에 "판매가의 N%"로 명시되므로 정확해야 한다.
+  //   판매가 10원 반올림 오차는 캠핑장 마진이 흡수한다(목표 %에서 소폭 흔들림).
+  const upMode = s.uMode === 'up';
+  // 업률 모드: 판매가를 먼저 정하고 캠핑장 마진이 결과로 나온다
+  // 마진 모드: 캠핑장 마진을 먼저 정하고 판매가가 결과로 나온다
+  const rawP   = upMode ? deliv * (1 + s.uUpRate/100)
+                        : (b < 1 ? deliv * (1 + s.campMargin/100) / (1 - b) : 0);
+  const settle0= upMode ? rawP * (1 - b) : deliv * (1 + s.campMargin/100);
+  const price  = r10(rawP, s.uRound);
+  const RMODE  = {2:'올림', 1:'반올림', 0:'미적용'}[s.uRound] || '반올림';
+
+  const fee    = price * b;                            // 서비스 이용료 = 판매가 × 요율 (정확)
+  const feeRate= s.uOpFee;                             // 실효 = 설정값과 동일
+  const settle = price - fee;                          // 캠핑장 정산액 = 잔여
+  const cMargin= settle - deliv;                       // 캠핑장 마진
+  const cmRate = deliv > 0 ? cMargin/deliv*100 : 0;    // 실제 캠핑장 마진율
+  const pg     = price * s.pg/100;
+  const camfitOn = fee - pg;                           // 캠핏이익금(온라인)
+  const camfitB2b= deliv - supply;                     // 캠핏 납품 마진
+  const upRate = settle > 0 ? (price/settle - 1) * 100 : 0;   // 정산액 → 판매가 업률
+
+  const w  = n => (Math.round(n*100)/100).toLocaleString('ko-KR') + '원';
+  const w0 = n => Math.round(n).toLocaleString('ko-KR') + '원';
+  const d  = (n) => `<span style="color:${n>=0?'#1565c0':'#c62828'};">${n>=0?'+':''}${w(n)}</span>`;
+  const seg = (v,base,c) => (base>0 && v>0) ? `<div style="width:${Math.min(100,(v/base)*100)}%;background:${c};" class="h-full"></div>` : '';
+  const warn = m => `<p class="text-xs mt-2" style="color:#b91c1c;">⚠️ ${m}</p>`;
+
+  // ── 색상 규칙: 공급사=회색 / 캠핏=보라 / 캠핑장=주황 / 판매가·캠퍼=파랑 / PG=핑크
+  const C = {sup:'#6b7280', camfit:'#7c3aed', camp:'#ea580c', price:'#2563eb', pg:'#db2777'};
+
+  // 가격 사다리 한 칸
+  const step = (no, label, formula, amount, color, sub, isMax) => `
+    <div class="flex items-center gap-3 py-2.5">
+      <div class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold text-white leading-none" style="background:${color};">${no}</div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-baseline justify-between gap-3">
+          <div class="text-sm font-semibold text-gray-800 truncate">${label}</div>
+          <div class="text-lg font-bold tabular-nums shrink-0" style="color:${color};">${amount}</div>
+        </div>
+        <div class="h-1.5 rounded-full mt-1.5" style="background:#e5e7eb;">
+          <div class="h-full rounded-full" style="width:${isMax}%;background:${color};opacity:.55;"></div>
+        </div>
+        <div class="flex items-baseline justify-between gap-3 mt-1">
+          <div class="text-[11px] font-mono text-gray-400 truncate">${formula}</div>
+          <div class="text-[11px] shrink-0" style="color:${color};">${sub}</div>
+        </div>
+      </div>
+    </div>`;
+
+  // 분배 트리 한 줄
+  const leaf = (depth, label, amount, color, note, strong) => `
+    <div class="flex items-center gap-2 py-1.5" style="padding-left:${depth*22}px;">
+      ${depth ? `<span class="text-gray-300 font-mono text-xs shrink-0">└</span>` : ''}
+      <span class="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style="background:${color};"></span>
+      <span class="text-xs ${strong?'font-bold text-gray-900':'text-gray-600'} shrink-0">${label}</span>
+      <span class="flex-1 border-b border-dotted border-gray-200 mx-1"></span>
+      <span class="text-sm ${strong?'font-bold':'font-semibold'} tabular-nums shrink-0" style="color:${color};">${amount}</span>
+      ${note ? `<span class="text-[11px] text-gray-400 shrink-0 w-20 text-right">${note}</span>` : '<span class="w-20 shrink-0"></span>'}
+    </div>`;
+
+  const maxV = Math.max(price, deliv, settle, supply) || 1;
+  const ladder = upMode
+    ? step(1,'공급사 공급가','기준', w0(supply), C.sup, '', supply/maxV*100)
+      + step(2,'캠핑장 납품가', `공급가 × (1 + ${s.b2bRate}%)`, w0(deliv), C.camfit, `캠핏 납품 마진 +${w0(camfitB2b)}`, deliv/maxV*100)
+      + step(3,'온라인 판매가 <span class="text-[10px] font-normal px-1 rounded" style="background:#dbeafe;color:#1d4ed8;">입력</span>', `납품가 × (1 + ${s.uUpRate}%)${s.uRound?` → 10원 ${RMODE}`:''}`, w0(price), C.price, s.uRound?`${w(rawP)} ${RMODE}`:'', price/maxV*100)
+    : step(1,'공급사 공급가','기준', w0(supply), C.sup, '', supply/maxV*100)
+      + step(2,'캠핑장 납품가', `공급가 × (1 + ${s.b2bRate}%)`, w0(deliv), C.camfit, `캠핏 납품 마진 +${w0(camfitB2b)}`, deliv/maxV*100)
+      + step(3,'캠핑장 정산가', `캠핑장 납품가 + 캠핑장 마진(${s.campMargin}%)`, w(settle0), C.camp, `마진 +${w(settle0-deliv)}`, settle0/maxV*100)
+      + step(4,'온라인 판매가 <span class="text-[10px] font-normal px-1 rounded" style="background:#dbeafe;color:#1d4ed8;">결과</span>', `캠핑장 정산가 ÷ (1 − ${s.uOpFee}%)${s.uRound?` → 10원 ${RMODE}`:''}`, w0(price), C.price, s.uRound?`${w(rawP)} ${RMODE}`:'', price/maxV*100);
+
+  box.innerHTML = `
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+      <!-- 왼쪽: 가격이 쌓이는 과정 -->
+      <div class="rounded-xl border border-gray-200 p-4">
+        <div class="text-sm font-bold text-gray-900 mb-1">가격이 만들어지는 과정</div>
+        <div class="text-[11px] text-gray-500 mb-2">아래로 갈수록 가격이 쌓입니다</div>
+        <div class="divide-y divide-gray-100">${ladder}</div>
+      </div>
+
+      <!-- 오른쪽: 결제액이 나뉘는 과정 -->
+      <div class="rounded-xl border border-gray-200 p-4">
+        <div class="text-sm font-bold text-gray-900 mb-1">캠퍼가 낸 ${w0(price)}이 나뉘는 과정</div>
+        <div class="text-[11px] text-gray-500 mb-2">먼저 2갈래, 각각 다시 2갈래</div>
+
+        <div class="rounded-lg px-3 py-2 mb-1 flex items-center justify-between" style="background:#eff6ff;">
+          <span class="text-xs font-bold" style="color:#1d4ed8;">캠퍼 결제</span>
+          <span class="text-lg font-bold tabular-nums" style="color:${C.price};">${w0(price)}</span>
+        </div>
+
+        ${leaf(1, `서비스 이용료`, w(fee), C.camfit, `${s.uOpFee}%`, true)}
+        ${leaf(2, `PG`, w(pg), C.pg, `${s.pg}%`, false)}
+        ${leaf(2, `캠핏이익금`, w(camfitOn), C.camfit, `${(camfitOn/price*100).toFixed(1)}%`, true)}
+        ${leaf(1, `캠핑장 정산가`, w(settle), C.camp, `${(settle/price*100).toFixed(1)}%`, true)}
+        ${leaf(2, `납품가 회수 <span class="text-gray-400">(이익 아님)</span>`, w0(deliv), C.sup, '', false)}
+        ${leaf(2, `캠핑장 마진`, w(cMargin), C.camp, `납품가 ${cmRate.toFixed(2)}%`, true)}
+      </div>
+    </div>
+
+    <!-- 결국 누가 얼마를 갖나 -->
+    <div class="mt-4 rounded-xl p-4" style="background:#f9fafb;border:1px solid #e5e7eb;">
+      <div class="text-xs font-bold text-gray-700 mb-3">결국 이 상품 1개에서 누가 얼마를 갖나 <span class="font-normal text-gray-400">(판매가 ${w0(price)} 기준)</span></div>
+      <div class="flex h-8 rounded-lg overflow-hidden border border-gray-200 mb-3">
+        ${seg(supply,price,'#d1d5db')}${seg(camfitB2b,price,C.camfit)}${seg(cMargin,price,C.camp)}${seg(pg,price,C.pg)}${seg(camfitOn,price,'#3b82f6')}
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div class="rounded-lg p-3" style="background:#f3e8ff;">
+          <div class="text-[11px] font-semibold" style="color:${C.camfit};">캠핏 합계</div>
+          <div class="text-lg font-bold tabular-nums whitespace-nowrap" style="color:#5b21b6;">${w(camfitB2b + camfitOn)}</div>
+          <div class="text-[11px] text-purple-700 mt-0.5">납품 ${w0(camfitB2b)} + 온라인 ${w(camfitOn)}</div>
+          <div class="text-[11px] text-gray-500">판매가의 ${((camfitB2b+camfitOn)/price*100).toFixed(2)}%</div>
+        </div>
+        <div class="rounded-lg p-3" style="background:#fff7ed;">
+          <div class="text-[11px] font-semibold" style="color:${C.camp};">캠핑장</div>
+          <div class="text-lg font-bold tabular-nums whitespace-nowrap" style="color:#9a3412;">${w(cMargin)}</div>
+          <div class="text-[11px] text-orange-700 mt-0.5">납품가 ${w0(deliv)}은 원가 회수</div>
+          <div class="text-[11px] text-gray-500">판매가의 ${(cMargin/price*100).toFixed(2)}%</div>
+        </div>
+        <div class="rounded-lg p-3" style="background:#fdf2f8;">
+          <div class="text-[11px] font-semibold" style="color:${C.pg};">PG사</div>
+          <div class="text-lg font-bold tabular-nums whitespace-nowrap" style="color:#9d174d;">${w(pg)}</div>
+          <div class="text-[11px] text-pink-700 mt-0.5">캠핏 부담</div>
+          <div class="text-[11px] text-gray-500">판매가의 ${s.pg}%</div>
+        </div>
+        <div class="rounded-lg p-3" style="background:#f3f4f6;">
+          <div class="text-[11px] font-semibold text-gray-600">공급사</div>
+          <div class="text-lg font-bold tabular-nums whitespace-nowrap text-gray-700">${w0(supply)}</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">상품 원가</div>
+          <div class="text-[11px] text-gray-500">판매가의 ${(supply/price*100).toFixed(2)}%</div>
+        </div>
+      </div>
+    </div>
+
+    ${!upMode && s.uRound && Math.abs(cmRate - s.campMargin) > 0.001
+      ? `<p class="text-xs mt-3" style="color:${s.uRound===2?'#15803d':'#b45309'};">※ 10원 ${RMODE} 때문에 캠핑장 마진이 목표 ${s.campMargin}% → <b>${cmRate.toFixed(2)}%</b>가 됐습니다. <b>서비스 이용료 ${s.uOpFee}%는 그대로</b>입니다.${s.uRound===2?' 올림이라 <b>목표 아래로는 내려가지 않습니다</b>.':''}</p>`
+      : ''}
+    ${upMode ? (() => {
+        const theo = (((1+s.uUpRate/100)*(1-b))-1)*100;   // 반올림 전 이론값
+        const gap  = Math.abs(cmRate - theo) > 0.005;
+        return `<p class="text-xs mt-3" style="color:#6b7280;">※ 캠핑장 마진율 = (1 + 업률) × (1 − 서비스 이용료율) − 1 = <b>${theo.toFixed(2)}%</b>${gap ? ` <span style="color:#b45309;">→ 10원 ${RMODE} 반영 후 실제 <b>${cmRate.toFixed(2)}%</b></span>` : ''} · 마진 0이 되는 업률 = <b>${((1/(1-b)-1)*100).toFixed(2)}%</b></p>`;
+      })() : ''}
+    ${camfitOn < 0 ? warn(`서비스 이용료가 PG(${w(pg)})보다 작아 <b>캠핏이익금이 마이너스</b>입니다. 손익분기 서비스 이용료율 = <b>${s.pg}%</b>.`) : ''}
+    ${cMargin < 0 ? warn(`캠핑장 마진이 <b>마이너스</b>입니다. ${upMode ? `업률을 <b>${((1/(1-b)-1)*100).toFixed(2)}%</b> 위로 올리거나 ` : ''}서비스 이용료율을 낮추세요.`) : ''}
+  `;
+}
+
+function updateCamfitCalc2() {
+  const s = calcState2;
+  // ★ 업률 모드에서는 캠핑장 마진율이 '결과값'이므로, 아래 월 총액 계산도 그 값을 따라가야 한다
+  //   (안 맞추면 단가 블록과 월 블록이 서로 다른 마진율로 계산됨)
+  if (s.uMode === 'up') {
+    s.campMargin = Math.round(((1 + s.uUpRate/100) * (1 - s.uOpFee/100) - 1) * 10000) / 100;
+  }
+  updateCalc2Unit();
+  updateCalc2General();
+
+  // A. 납품(B2B) — RS버전과 완전 동일
+  const deliverTot = s.deliverPerCamp * s.camps;
+  const b2bGross   = deliverTot * s.b2bRate/100;
+  const b2bCard    = s.b2bPay === 'card';
+  const b2bPg      = b2bCard ? deliverTot * s.pg/100 : 0;
+  const b2bCost    = deliverTot - b2bGross;
+  const b2bNet     = b2bGross - b2bPg;
+
+  // B. 온라인 — 2026-07-31 확정 구조: 거래액에서 서비스 이용료를 떼고, 나머지가 캠핑장 정산액
+  const GMV       = s.avgSpend * s.resv * s.camps * (s.adopt/100);  // 거래액 = 캠퍼 결제 총액
+  const opFee     = GMV * s.uOpFee/100;                             // 서비스 이용료 (판매가 기준, 정확)
+  const settleTot = GMV - opFee;                                    // 캠핑장 정산액 총액
+  const deliver   = settleTot / (1 + s.campMargin/100);             // 캠핑장 구입원가 회수분
+  const campAmt   = settleTot - deliver;                            // 캠핑장 마진
+  const onPg      = GMV * s.pg/100;
+  const onNet     = opFee - onPg;                                   // 캠핏 온라인 마진
+  const useRate   = deliverTot > 0 ? (deliver/deliverTot)*100 : 0;
+  const total     = b2bNet + onNet;
+  // ★ 온라인 판매가 마진율은 입력이 아니라 결과값
+  const upResult  = ((1 + s.campMargin/100)/(1 - s.uOpFee/100) - 1) * 100;
+
+  // C. 손익분기 — 서비스 이용료가 PG만 커버하면 되므로 손익분기 = PG율 그 자체
+  const beFee  = s.pg;
+  const feeNew = s.uOpFee;   // 서비스 이용료율(거래액 대비)
+
+  const won = n => Math.round(n).toLocaleString('ko-KR') + '원';
+  const pct = (n,base) => base>0 ? ((n/base)*100).toFixed(1)+'%' : '-';
+  const seg = (val,base,color) => (base>0 && val>0) ? `<div style="width:${Math.min(100,(val/base)*100)}%;background:${color};" class="h-full"></div>` : '';
+  const warn = msg => `<p class="text-xs mt-2" style="color:#b91c1c;">⚠️ ${msg}</p>`;
+  const note = msg => `<p class="text-xs mt-2" style="color:#b45309;">※ ${msg}</p>`;
+  const chip = (color,label,val,base) => `<span><span class="inline-block w-3 h-3 rounded-sm align-middle mr-1" style="background:${color}"></span>${label} ${won(val)} · ${pct(val,base)}</span>`;
+  document.getElementById('calc2Result').innerHTML = `
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <h3 class="font-bold text-gray-900 mb-1">📦 납품(B2B) 비즈니스</h3>
+      <p class="text-xs text-gray-500 mb-3">캠핑장당 납품금액 × 캠핑장 수 = 납품 총액 → 캠핏 마진율 ${b2bCard ? '− PG' : ''} · 결제 <b>${b2bCard ? '카드·PG' : '계좌이체(PG 없음)'}</b></p>
+      <div class="flex h-7 rounded-lg overflow-hidden border border-gray-200">
+        ${seg(b2bCost,deliverTot,'#9ca3af')}${seg(b2bPg,deliverTot,'#f472b6')}${seg(b2bNet,deliverTot,'#7c3aed')}
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs text-gray-700">
+        ${chip('#9ca3af','원가·기타',b2bCost,deliverTot)}
+        ${b2bCard ? chip('#f472b6','B2B PG',b2bPg,deliverTot) : ''}
+        ${chip('#7c3aed','캠핏 납품 마진',b2bNet,deliverTot)}
+      </div>
+      ${b2bNet < 0 ? warn('납품 마진율이 PG 수수료율보다 낮아 납품 마진이 <b>마이너스</b>입니다.') : ''}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+        <div class="rounded-xl p-4" style="background:#f3e8ff;">
+          <div class="text-xs text-purple-700 font-semibold">캠핏 납품 마진 (월)</div>
+          <div class="text-2xl font-bold text-purple-900 mt-1">${won(b2bNet)}</div>
+          <div class="text-xs text-purple-700 mt-1">납품 총액 대비 ${pct(b2bNet,deliverTot)} · 연 ${won(b2bNet*12)}</div>
+        </div>
+        <div class="rounded-xl p-4" style="background:#f3f4f6;">
+          <div class="text-xs text-gray-600 font-semibold">납품 총액 (월)</div>
+          <div class="text-2xl font-bold text-gray-800 mt-1">${won(deliverTot)}</div>
+          <div class="text-xs text-gray-500 mt-1">${won(s.deliverPerCamp)}/곳 × ${fmt(s.camps)}곳</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <h3 class="font-bold text-gray-900 mb-1">🛒 오더앤픽 온라인 정산 <span class="text-xs font-normal" style="color:#dc2626;">RS 폐지</span></h3>
+      <p class="text-xs text-gray-500 mb-1">거래액 ${won(GMV)} (연 ${won(GMV*12)}) — 캠퍼 ${won(s.avgSpend)} × 예약 ${fmt(s.resv)}건 × ${fmt(s.camps)}곳 × 이용률 ${s.adopt}%</p>
+      <p class="text-xs mb-3" style="color:#1d4ed8;">거래액에서 <b>서비스 이용료 ${s.uOpFee}%</b>를 공제하고, 나머지 <b>${won(settleTot)}</b>이 캠핑장 정산액(구입원가 회수 + 마진)입니다.</p>
+      <div class="flex h-7 rounded-lg overflow-hidden border border-gray-200">
+        ${seg(deliver,GMV,'#9ca3af')}${seg(campAmt,GMV,'#fb923c')}${seg(onPg,GMV,'#f472b6')}${seg(onNet,GMV,'#2563eb')}
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs text-gray-700">
+        ${chip('#9ca3af','납품가(캠핑장 회수)',deliver,GMV)}
+        ${chip('#fb923c','캠핑장 마진',campAmt,GMV)}
+        ${chip('#f472b6','온라인 PG',onPg,GMV)}
+        ${chip('#2563eb','캠핏 온라인 마진',onNet,GMV)}
+      </div>
+      <p class="text-xs text-gray-500 mt-2">
+        온라인 소진율 <b>${useRate.toFixed(1)}%</b> — 납품 총액 ${won(deliverTot)} 중 ${won(deliver)} 어치가 온라인으로 판매됩니다 (나머지는 매점 오프라인 판매).
+      </p>
+      ${useRate > 100 ? warn('온라인 판매분이 <b>납품 총액을 초과</b>합니다. 캠핑장당 납품금액을 올리거나 이용률·예약건수를 낮춰 주세요.') : ''}
+      ${onNet < 0 ? warn(`서비스 이용료율 ${s.uOpFee}%가 손익분기 <b>${beFee.toFixed(2)}%</b>(= PG율)에 못 미쳐 캠핏 온라인 마진이 <b>마이너스</b>입니다.`) : ''}
+      ${note(`이 구조의 <b>온라인 판매가 마진율은 ${upResult.toFixed(2)}%</b>(납품가 대비)입니다 — 입력값이 아니라 <b>캠핑장 마진 ${s.campMargin}%와 서비스 이용료 ${s.uOpFee}%로부터 결정된 결과값</b>입니다.`)}
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+        <div class="rounded-xl p-4" style="background:#e3f2fd;">
+          <div class="text-xs text-blue-700 font-semibold">캠핏 온라인 마진 (월)</div>
+          <div class="text-2xl font-bold text-blue-900 mt-1">${won(onNet)}</div>
+          <div class="text-xs text-blue-700 mt-1">거래액 대비 ${pct(onNet,GMV)} · 연 ${won(onNet*12)}</div>
+        </div>
+        <div class="rounded-xl p-4" style="background:#fff3e0;">
+          <div class="text-xs text-orange-700 font-semibold">캠핑장 수익 · 마진 (월)</div>
+          <div class="text-2xl font-bold text-orange-900 mt-1">${won(campAmt)}</div>
+          <div class="text-xs text-orange-700 mt-1">납품가의 ${s.campMargin}% · 연 ${won(campAmt*12)}</div>
+          <div class="text-xs text-gray-600 mt-1">1곳당 월 <b>${won(campAmt/(s.camps||1))}</b> · 구입원가 별도 회수</div>
+        </div>
+      </div>
+      <div class="mt-3 text-xs text-gray-600 font-mono bg-gray-50 rounded p-3 leading-relaxed">
+        서비스 이용료 = 거래액 × ${s.uOpFee}% = ${won(GMV)} × ${s.uOpFee}% = <b>${won(opFee)}</b><br>
+        캠핑장 정산액 = 거래액 − 서비스 이용료 = <b>${won(settleTot)}</b> → 구입원가 회수 ${won(deliver)} + 마진 ${won(campAmt)}<br>
+        캠핏 온라인 마진 = 서비스 이용료 − PG = ${won(opFee)} − ${won(onPg)} = <b>${won(onNet)}</b>
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <h3 class="font-bold text-gray-900 mb-3">📐 손익분기 · 서비스 이용료율 · 온라인 업률(결과)</h3>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div class="rounded-xl p-4 border ${s.uOpFee >= beFee ? 'border-green-200' : 'border-red-200'}" style="background:${s.uOpFee >= beFee ? '#f0fdf4' : '#fef2f2'};">
+          <div class="text-xs font-semibold" style="color:${s.uOpFee >= beFee ? '#15803d' : '#b91c1c'};">손익분기 서비스 이용료율</div>
+          <div class="text-2xl font-bold mt-1" style="color:${s.uOpFee >= beFee ? '#14532d' : '#7f1d1d'};">${beFee.toFixed(2)}%</div>
+          <div class="text-xs mt-1" style="color:#4b5563;">현재 <b>${s.uOpFee}%</b> → ${s.uOpFee >= beFee ? '✅ 흑자권' : '❌ 적자'}</div>
+          <div class="text-xs mt-1" style="color:#6b7280;">RS가 없어 <b>PG만 커버</b>하면 됩니다</div>
+        </div>
+        <div class="rounded-xl p-4 border border-gray-200 bg-gray-50">
+          <div class="text-xs text-gray-600 font-semibold">서비스 이용료율 (거래액 대비)</div>
+          <div class="text-2xl font-bold text-gray-800 mt-1">${feeNew.toFixed(2)}%</div>
+          <div class="text-xs mt-1" style="color:#4b5563;">거래액에서 공제하는 비율 그대로</div>
+        </div>
+        <div class="rounded-xl p-4 border border-blue-200" style="background:#eff6ff;">
+          <div class="text-xs font-semibold" style="color:#1d4ed8;">온라인 판매가 마진율 <span class="font-normal">(결과값)</span></div>
+          <div class="text-2xl font-bold mt-1" style="color:#1e3a8a;">${upResult.toFixed(2)}%</div>
+          <div class="text-xs mt-1" style="color:#4b5563;">(1+${s.campMargin}%) ÷ (1−${s.uOpFee}%) − 1</div>
+        </div>
+      </div>
+      <p class="text-xs text-gray-500 mt-3">★ 새 구조에서 <b>「온라인 판매가 마진율」은 입력이 아니라 결과</b>입니다. 캠핑장 마진율과 서비스 이용료율을 정하면 자동으로 따라옵니다.</p>
     </section>
 
     <section class="rounded-xl shadow-sm p-5 mb-4" style="background:linear-gradient(135deg,#1e3a8a,#312e81);color:#fff;">

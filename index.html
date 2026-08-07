@@ -111,6 +111,9 @@
   // SKU 경쟁력 시뮬레이터 전용 API — 시트 「초기 SKU(연동용)」
   // ★ 위 APPS_SCRIPT_URL과 별개. apps-script-skucompare.gs 를 새 프로젝트로 배포한 뒤 그 URL을 넣는다.
   const SKUCMP_URL = 'https://script.google.com/macros/s/AKfycbzTH-3hw4mlLAaGy_4BSpK6qNO80DHq6c4zhqV2NQI9YMC-Z4GrGtalWcdXJv9YUDoIoA/exec';
+
+  // 자주 묻는 질문 — 시트 「오더앤픽 FAQ」 조회·작성·수정 (doGet + doPost)
+  const FAQ_URL = 'https://script.google.com/macros/s/AKfycbw43KQv4GcHaOqnqs73dwDJ4CcH7vgjiQVGKRM9axnCbhgYLFHorCHwzzB2aLm3bay6/exec';
 </script>
 
 <!-- 헤더 -->
@@ -149,6 +152,9 @@
       </div>
       <div class="nav-item" data-section="skucompare">
         <span class="text-lg">🏷</span><span>SKU 경쟁력 시뮬레이터</span>
+      </div>
+      <div class="nav-item" data-section="faq">
+        <span class="text-lg">💬</span><span>채널톡 (자주 묻는 질문)</span>
       </div>
 
       <div class="nav-group off"><span class="dot" style="background:#d4d4d8"></span>사용 불가</div>
@@ -264,7 +270,7 @@ function hideLoading() {
 
 // allSkus(견적체크 시트)가 필요 없는 섹션 — 계산기 3종은 입력만으로, SKU 경쟁력은 자체 API로 돈다
 function isStandaloneSection(sec) {
-  return sec.startsWith('camfitcalc') || sec === 'skucompare' || sec === 'sellercalc';
+  return sec.startsWith('camfitcalc') || sec === 'skucompare' || sec === 'sellercalc' || sec === 'faq';
 }
 
 async function loadData() {
@@ -311,7 +317,8 @@ function render() {
     camfitcalc2: renderCamfitCalc2,
     camfitcalc3: renderCamfitCalc3,
     sellercalc: renderSellerCalc,
-    skucompare: renderSkuCompare
+    skucompare: renderSkuCompare,
+    faq: renderFaqPage
   };
   const fn = map[currentSection] || renderDashboard;
   document.getElementById('sectionContainer').innerHTML = fn();
@@ -327,6 +334,7 @@ function render() {
   if (currentSection === 'camfitcalc3') attachCamfitCalc3Handlers();
   if (currentSection === 'skucompare') attachSkuCompareHandlers();
   if (currentSection === 'sellercalc') attachSellerCalcHandlers();
+  if (currentSection === 'faq') attachFaqHandlers();
 }
 
 // ===== 1. 대시보드 =====
@@ -2957,6 +2965,315 @@ function updateCamfitCalc2() {
       <div class="text-sm mt-2" style="opacity:.9;">납품 ${won(b2bNet)} + 온라인 ${won(onNet)} · 연 ${won(total*12)}</div>
     </section>
   `;
+}
+
+// ===== 💬 자주 묻는 질문 =====
+// 시트 「오더앤픽 FAQ」를 읽고 쓴다. 채널톡 봇에 올릴 문구를 팀이 함께 다듬는 용도.
+//   조회 doGet / 작성·수정·삭제 doPost  ← 같은 GAS 프로젝트(신규 독립)
+const FAQ_CATS = {
+  '캠퍼':          ['주문·결제','픽업·수령','취소·환불','상품·가격','신선식품','기타'],
+  '캠지기·공급사': ['발주·배송','정산·수익','재고·유통기한','키오스크·결제','온라인 판매·가격','신선식품','계약·가입','캠퍼 응대','기타']
+};
+const FAQ_STATUS = ['확정','미결','초안'];
+const FAQ_SC = {'확정':{bg:'#dcfce7',fg:'#166534'}, '미결':{bg:'#fef3c7',fg:'#92400e'}, '초안':{bg:'#e5e7eb',fg:'#4b5563'}};
+
+const faqState = { target: '캠지기·공급사', cat: 'all', status: 'all', q: '', editing: null, adding: false };
+let faqData = null, faqError = null, faqLoading = false, faqBusy = false;
+
+const faqEsc = s => String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+function loadFaq(force) {
+  if (faqLoading) return;
+  if (faqData && !force) return;
+  if (!FAQ_URL || FAQ_URL.indexOf('YOUR_') === 0) { faqError = 'NOURL'; return; }
+  faqLoading = true;
+  fetch(FAQ_URL)
+    .then(r => r.json())
+    .then(d => { if (!d.ok) throw new Error(d.err || '불러오기 실패'); faqData = d.items || []; faqError = null; })
+    .catch(e => { faqError = e.message || String(e); })
+    .then(() => { faqLoading = false; if (currentSection === 'faq') { updateFaqList(); } });
+}
+
+async function faqPost(body) {
+  const res = await fetch(FAQ_URL, {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain;charset=utf-8'},
+    body: JSON.stringify(body)
+  });
+  const d = await res.json();
+  if (!d.ok) throw new Error(d.err || '저장 실패');
+  return d;
+}
+
+function faqFiltered() {
+  const s = faqState;
+  const q = s.q.trim().toLowerCase();
+  return (faqData || [])
+    .filter(x => x.target === s.target)
+    .filter(x => s.cat === 'all' || x.category === s.cat)
+    .filter(x => s.status === 'all' || x.status === s.status)
+    .filter(x => !q || (x.question + ' ' + x.answer).toLowerCase().indexOf(q) >= 0);
+}
+
+function renderFaqPage() {
+  loadFaq();
+  const s = faqState;
+  const tabBtn = (t) => `<button class="faq-tgt px-4 py-2 rounded-lg text-sm font-semibold border transition" data-t="${t}"
+      style="${s.target===t ? 'background:#1f6d4a;color:#fff;border-color:#1f6d4a;' : 'background:#fff;color:#4b5563;border-color:#d1d5db;'}">${t}</button>`;
+  const opt = (v, cur, label) => `<option value="${faqEsc(v)}" ${cur===v?'selected':''}>${faqEsc(label||v)}</option>`;
+
+  return `
+    <h1 class="text-2xl font-bold text-gray-900 mb-1">💬 자주 묻는 질문</h1>
+    <p class="text-sm text-gray-500 mb-4">채널톡 봇에 올릴 문구를 여기서 작성·수정합니다. <b>구글시트 「오더앤픽 FAQ」에 바로 저장</b>되어 다른 사람도 즉시 볼 수 있습니다.</p>
+
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4">
+      <div class="flex flex-wrap items-center gap-2 mb-4">
+        ${tabBtn('캠지기·공급사')}
+        ${tabBtn('캠퍼')}
+        <span class="flex-1"></span>
+        <button id="faqAdd" class="px-3 py-2 rounded-lg text-sm font-semibold text-white" style="background:#0369a1;">+ 새 문항</button>
+        <button id="faqReload" class="px-3 py-2 rounded-lg text-sm border border-gray-300 bg-white">🔄</button>
+        <button id="faqCsv" class="px-3 py-2 rounded-lg text-sm border border-gray-300 bg-white">⬇ CSV</button>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">검색</label>
+          <input id="faqQ" type="text" value="${faqEsc(s.q)}" placeholder="질문·답변 내용" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">카테고리</label>
+          <select id="faqCat" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+            ${opt('all', s.cat, '전체')}${FAQ_CATS[s.target].map(c => opt(c, s.cat)).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">상태</label>
+          <select id="faqStatus" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+            ${opt('all', s.status, '전체')}${FAQ_STATUS.map(v => opt(v, s.status)).join('')}
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <div id="faqEditor"></div>
+    <div id="faqList"></div>
+  `;
+}
+
+function attachFaqHandlers() {
+  document.querySelectorAll('.faq-tgt').forEach(b => b.addEventListener('click', () => {
+    faqState.target = b.dataset.t; faqState.cat = 'all'; faqState.editing = null; faqState.adding = false;
+    render();
+  }));
+  const q = document.getElementById('faqQ');
+  if (q) q.addEventListener('input', () => { faqState.q = q.value; updateFaqList(); });
+  ['faqCat','faqStatus'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => {
+      faqState[id === 'faqCat' ? 'cat' : 'status'] = el.value; updateFaqList();
+    });
+  });
+  const add = document.getElementById('faqAdd');
+  if (add) add.addEventListener('click', () => { faqState.adding = true; faqState.editing = null; updateFaqEditor(); });
+  const rl = document.getElementById('faqReload');
+  if (rl) rl.addEventListener('click', () => { faqData = null; loadFaq(true); updateFaqList(); });
+  const cs = document.getElementById('faqCsv');
+  if (cs) cs.addEventListener('click', faqCsv);
+  updateFaqEditor();
+  updateFaqList();
+}
+
+function updateFaqEditor() {
+  const box = document.getElementById('faqEditor');
+  if (!box) return;
+  const s = faqState;
+  if (!s.adding && !s.editing) { box.innerHTML = ''; return; }
+
+  const cur = s.editing ? (faqData || []).find(x => x.id === s.editing) : null;
+  const tgt = cur ? cur.target : s.target;
+  const author = localStorage.getItem('faqAuthor') || (cur ? cur.author : '');
+  const opt = (v, c) => `<option value="${faqEsc(v)}" ${c===v?'selected':''}>${faqEsc(v)}</option>`;
+
+  box.innerHTML = `
+    <section class="bg-white rounded-xl shadow-sm p-5 mb-4" style="border:2px solid #0369a1;">
+      <h3 class="font-bold text-gray-900 mb-3">${cur ? '✏️ 문항 수정' : '＋ 새 문항'}</h3>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">대상</label>
+          <select id="faqEdTarget" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+            ${Object.keys(FAQ_CATS).map(t => opt(t, tgt)).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">카테고리</label>
+          <select id="faqEdCat" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+            ${FAQ_CATS[tgt].map(c => opt(c, cur ? cur.category : '')).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">상태</label>
+          <select id="faqEdStatus" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white">
+            ${FAQ_STATUS.map(v => opt(v, cur ? cur.status : '초안')).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">작성자</label>
+          <input id="faqEdAuthor" type="text" value="${faqEsc(author)}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+        </div>
+      </div>
+      <label class="block text-xs text-gray-500 mb-1">질문</label>
+      <input id="faqEdQ" type="text" value="${faqEsc(cur ? cur.question : '')}" placeholder="예) 발주는 언제까지 해야 하나요?"
+             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3" />
+      <label class="block text-xs text-gray-500 mb-1">답변 <span class="text-gray-400">줄바꿈은 그대로 저장됩니다</span></label>
+      <textarea id="faqEdA" rows="6" placeholder="채널톡에 그대로 올릴 문구를 씁니다"
+                class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">${faqEsc(cur ? cur.answer : '')}</textarea>
+      <div class="flex items-center gap-2 mt-3">
+        <button id="faqSave" class="px-4 py-2 rounded-lg text-sm font-semibold text-white" style="background:#1f6d4a;">저장</button>
+        <button id="faqCancel" class="px-4 py-2 rounded-lg text-sm border border-gray-300 bg-white">취소</button>
+        ${cur ? `<span class="flex-1"></span><button id="faqDel" class="px-3 py-2 rounded-lg text-sm border" style="border-color:#fca5a5;color:#b91c1c;">삭제</button>` : ''}
+        <span id="faqMsg" class="text-xs"></span>
+      </div>
+    </section>`;
+
+  document.getElementById('faqEdTarget').addEventListener('change', (e) => {
+    const t = e.target.value;
+    const sel = document.getElementById('faqEdCat');
+    sel.innerHTML = FAQ_CATS[t].map(c => `<option value="${faqEsc(c)}">${faqEsc(c)}</option>`).join('');
+  });
+  document.getElementById('faqSave').addEventListener('click', faqSave);
+  document.getElementById('faqCancel').addEventListener('click', () => {
+    faqState.adding = false; faqState.editing = null; updateFaqEditor(); updateFaqList();
+  });
+  const del = document.getElementById('faqDel');
+  if (del) del.addEventListener('click', faqDelete);
+}
+
+async function faqSave() {
+  if (faqBusy) return;
+  const msg = document.getElementById('faqMsg');
+  const q = document.getElementById('faqEdQ').value.trim();
+  const a = document.getElementById('faqEdA').value.trim();
+  if (!q) { msg.style.color = '#b91c1c'; msg.textContent = '질문을 입력해 주세요.'; return; }
+
+  const author = document.getElementById('faqEdAuthor').value.trim();
+  localStorage.setItem('faqAuthor', author);
+  const body = {
+    action: faqState.editing ? 'update' : 'create',
+    target: document.getElementById('faqEdTarget').value,
+    category: document.getElementById('faqEdCat').value,
+    status: document.getElementById('faqEdStatus').value,
+    question: q, answer: a, author: author
+  };
+  if (faqState.editing) body.id = faqState.editing;
+
+  faqBusy = true; msg.style.color = '#6b7280'; msg.textContent = '저장 중…';
+  try {
+    await faqPost(body);
+    faqData = null; faqState.adding = false; faqState.editing = null;
+    loadFaq(true);
+    updateFaqEditor();
+  } catch (e) {
+    msg.style.color = '#b91c1c'; msg.textContent = '❌ ' + e.message;
+  } finally { faqBusy = false; }
+}
+
+async function faqDelete() {
+  if (faqBusy || !faqState.editing) return;
+  if (!confirm('이 문항을 삭제할까요? 시트에서도 지워집니다.')) return;
+  const msg = document.getElementById('faqMsg');
+  faqBusy = true; msg.style.color = '#6b7280'; msg.textContent = '삭제 중…';
+  try {
+    await faqPost({ action: 'delete', id: faqState.editing });
+    faqData = null; faqState.editing = null; faqState.adding = false;
+    loadFaq(true);
+    updateFaqEditor();
+  } catch (e) {
+    msg.style.color = '#b91c1c'; msg.textContent = '❌ ' + e.message;
+  } finally { faqBusy = false; }
+}
+
+function updateFaqList() {
+  const box = document.getElementById('faqList');
+  if (!box) return;
+
+  if (!faqData) {
+    box.innerHTML = faqError === 'NOURL'
+      ? `<section class="bg-amber-50 border border-amber-200 rounded-xl p-6 text-sm text-amber-800">⚙️ <code>apps-script-faq.gs</code>를 배포한 뒤 <b>FAQ_URL</b>을 넣어주세요.</section>`
+      : faqError
+        ? `<section class="bg-red-50 border border-red-200 rounded-xl p-6"><h3 class="font-bold text-red-900 mb-1">❌ 불러오지 못했습니다</h3><p class="text-sm text-red-800 font-mono">${faqEsc(faqError)}</p></section>`
+        : `<section class="bg-white rounded-xl shadow-sm p-6 text-center text-gray-400 text-sm">불러오는 중…</section>`;
+    return;
+  }
+
+  const rows = faqFiltered();
+  const total = faqData.filter(x => x.target === faqState.target).length;
+  const byCat = {};
+  rows.forEach(r => { (byCat[r.category] || (byCat[r.category] = [])).push(r); });
+  const order = FAQ_CATS[faqState.target].filter(c => byCat[c]);
+  Object.keys(byCat).forEach(c => { if (order.indexOf(c) < 0) order.push(c); });   // 시트에 다른 값이 들어와도 표시
+
+  const badge = st => {
+    const c = FAQ_SC[st] || FAQ_SC['초안'];
+    return `<span class="text-[10px] px-1.5 py-0.5 rounded font-semibold shrink-0" style="background:${c.bg};color:${c.fg};">${faqEsc(st||'초안')}</span>`;
+  };
+
+  box.innerHTML = `
+    <section class="bg-white rounded-xl shadow-sm p-5">
+      <div class="flex items-baseline gap-2 mb-3">
+        <h3 class="font-bold text-gray-900">${faqEsc(faqState.target)}</h3>
+        <span class="text-sm text-gray-400">${rows.length}개${rows.length !== total ? ` / 전체 ${total}개` : ''}</span>
+      </div>
+      ${rows.length === 0 ? `<p class="py-8 text-center text-gray-400 text-sm">${total === 0 ? '아직 등록된 문항이 없습니다. <b>+ 새 문항</b>으로 시작해 보세요.' : '조건에 맞는 문항이 없습니다.'}</p>` :
+        order.map(cat => `
+          <div class="mb-4">
+            <div class="text-xs font-bold text-gray-500 mb-2 pb-1 border-b border-gray-100">${faqEsc(cat)} <span class="font-normal text-gray-400">${byCat[cat].length}</span></div>
+            ${byCat[cat].map(r => `
+              <div class="py-2.5 border-b border-gray-50">
+                <div class="flex items-start gap-2">
+                  ${badge(r.status)}
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-semibold text-gray-900">${faqEsc(r.question)}</div>
+                    <div class="text-sm text-gray-600 mt-1" style="white-space:pre-wrap;">${faqEsc(r.answer) || '<span class="text-gray-300">(답변 없음)</span>'}</div>
+                    <div class="text-[11px] text-gray-400 mt-1">${faqEsc(r.author||'')}${r.author?' · ':''}${faqEsc(r.updatedAt||'')}</div>
+                  </div>
+                  <div class="flex gap-1 shrink-0">
+                    <button class="faq-copy px-2 py-1 rounded text-xs border border-gray-200 bg-white" data-id="${faqEsc(r.id)}" title="질문+답변 복사">📋</button>
+                    <button class="faq-edit px-2 py-1 rounded text-xs border border-gray-200 bg-white" data-id="${faqEsc(r.id)}" title="수정">✏️</button>
+                  </div>
+                </div>
+              </div>`).join('')}
+          </div>`).join('')}
+    </section>`;
+
+  box.querySelectorAll('.faq-edit').forEach(b => b.addEventListener('click', () => {
+    faqState.editing = b.dataset.id; faqState.adding = false;
+    updateFaqEditor();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }));
+  box.querySelectorAll('.faq-copy').forEach(b => b.addEventListener('click', async () => {
+    const r = (faqData || []).find(x => x.id === b.dataset.id);
+    if (!r) return;
+    try {
+      await navigator.clipboard.writeText(`Q. ${r.question}\n\n${r.answer}`);
+      const o = b.textContent; b.textContent = '✅';
+      setTimeout(() => { b.textContent = o; }, 1200);
+    } catch (e) { alert('복사에 실패했습니다: ' + e.message); }
+  }));
+}
+
+function faqCsv() {
+  const rows = faqFiltered();
+  if (!rows.length) { alert('내보낼 문항이 없습니다.'); return; }
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const head = ['대상','카테고리','질문','답변','상태'];
+  const csv = '﻿' + [head.map(q).join(',')]
+    .concat(rows.map(r => [r.target, r.category, r.question, r.answer, r.status].map(q).join(',')))
+    .join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8'}));
+  a.download = `오더앤픽-FAQ-${faqState.target}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
 }
 
 // ===== 🛍 일반 셀러 판매 계산기 =====

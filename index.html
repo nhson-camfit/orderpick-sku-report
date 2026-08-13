@@ -143,8 +143,16 @@
   <!-- shrink-0: 넓은 표가 있는 탭에서 사이드바가 찌그러지지 않도록 -->
   <aside class="w-64 shrink-0 min-h-[calc(100vh-57px)] bg-white border-r border-gray-200 p-4 sticky top-[57px]">
     <nav class="space-y-1">
+      <div class="nav-group on" style="color:#7c3aed"><span class="dot" style="background:#7c3aed"></span>2단계 · 캠핑장 매점 연동</div>
+      <div class="nav-item active" data-section="camp2calc">
+        <span class="text-lg">🏪</span><span>마진 계산기</span>
+      </div>
+      <div class="nav-item" data-section="camp2price">
+        <span class="text-lg">🏷</span><span>품목별 가격</span>
+      </div>
+
       <div class="nav-group on"><span class="dot" style="background:#1f6d4a"></span>사용 가능</div>
-      <div class="nav-item active" data-section="camfitcalc3">
+      <div class="nav-item" data-section="camfitcalc3">
         <span class="text-lg">🎯</span><span>캠핏 마진 계산기 (선 판매가 산정)</span>
       </div>
       <div class="nav-item" data-section="sellercalc">
@@ -201,7 +209,7 @@ let allCounts = {};
 let allMargins = {};
 let allMarginLabels = {};
 let allVendors = [];
-let currentSection = 'camfitcalc3';
+let currentSection = 'camp2calc';
 let currentTier = 'S';   // 기본 = 대형(전체)
 
 const categoryEmoji = {
@@ -318,7 +326,9 @@ function render() {
     camfitcalc3: renderCamfitCalc3,
     sellercalc: renderSellerCalc,
     skucompare: renderSkuCompare,
-    faq: renderFaqPage
+    faq: renderFaqPage,
+    camp2calc: renderCamp2Calc,
+    camp2price: renderCamp2Price
   };
   const fn = map[currentSection] || renderDashboard;
   document.getElementById('sectionContainer').innerHTML = fn();
@@ -335,6 +345,8 @@ function render() {
   if (currentSection === 'skucompare') attachSkuCompareHandlers();
   if (currentSection === 'sellercalc') attachSellerCalcHandlers();
   if (currentSection === 'faq') attachFaqHandlers();
+  if (currentSection === 'camp2calc') attachCamp2CalcHandlers();
+  if (currentSection === 'camp2price') attachCamp2PriceHandlers();
 }
 
 // ===== 1. 대시보드 =====
@@ -3515,7 +3527,7 @@ function loadSkuCompare() {
     .then(r => r.json())
     .then(d => { if (d.error) throw new Error(d.error); skuCmpData = d; skuCmpError = null; })
     .catch(e => { skuCmpError = e.message || String(e); })
-    .then(() => { skuCmpLoading = false; if (currentSection === 'skucompare') render(); });
+    .then(() => { skuCmpLoading = false; if (currentSection === 'skucompare' || currentSection === 'camp2price') render(); });
 }
 
 // 현재 요율을 60종에 적용한 결과
@@ -3755,6 +3767,520 @@ function updateSkuCompare() {
     </section>
   `;
 }
+
+/* ============================================================
+   2단계 · 캠핑장 매점 연동
+   캠핑장이 이미 보유한 매점 재고를 오더앤픽에서 온라인 판매한다.
+   캠핏은 납품 마진 없이 수수료만 수취 → 판매가에서 수수료를 빼면 공급가.
+   판매가 기준 = 하나로마트 대비 (캠핏이 결정)
+   ============================================================ */
+const camp2State = {
+  fee: 8,           // 캠핏 수수료율 % — 1단계 서비스 이용료와 동일 (2026-08-13 확정)
+  pg: 3.3,          // PG 수수료율 %
+  camps: 50,        // 캠핑장 수
+  avgSpend: 30000,  // 캠퍼 평균 주문금액
+  resv: 100,        // 캠핑장 월 평균 예약건수
+  adopt: 20,        // 오더앤픽 이용률 %
+  open: {},   // 유형별 상세 펼침 상태
+  // ⚠️ 아래는 시트에 「유형」·「오더앤픽 판매가」 열이 아직 없을 때만 쓰는 예비값이다.
+  //    시트에 열이 들어오면 화면은 시트를 따라가고 이 배열은 쓰이지 않는다.
+  types: [
+    { cat:'라면',   name:'컵라면 (대)',     spec:'105~120g',  price:1500, skus:['신라면컵(대)','새우탕컵(대)','팔도 왕뚜껑','큰컵불닭볶음면'] },
+    { cat:'라면',   name:'컵라면 (소·사발)', spec:'86g',       price:1300, skus:['육개장사발면','김치사발면'] },
+    { cat:'라면',   name:'봉지라면',        spec:'120~140g',  price:1000, skus:['농심신라면','농심짜파게티','농심안성탕면','진라면_매운맛'] },
+    { cat:'제과',   name:'봉지과자 (대)',    spec:'135g 이상', price:2400, skus:['맛동산','썬 핫스파이시'] },
+    { cat:'제과',   name:'봉지과자 (중)',    spec:'60~115g',   price:1500, skus:['짱구','새우깡','오징어땅콩','자갈치','꿀꽈배기','꼬북칩 콘스프','바나나킥','꼬깔콘 고소한맛','포카칩 오리지널','허니버터칩'] },
+    { cat:'제과',   name:'초코·비스킷',      spec:'37~54g',    price:1800, skus:['빼빼로 초코','빼빼로 아몬드','칸쵸','홈런볼'] },
+    { cat:'음료',   name:'생수 500ml',     spec:'500ml',     price:800,  skus:['동원샘물 500ml'] },
+    { cat:'음료',   name:'생수 2L',        spec:'2L',        price:1500, skus:['동원샘물 2L'] },
+    { cat:'음료',   name:'탄산 (대)',       spec:'1.5L',      price:3500, skus:['코카콜라 (일반용)','칠성사이다 (일반용)'] },
+    { cat:'음료',   name:'이온·차 음료',     spec:'300~500ml', price:2000, skus:['포카리스웨트','광동 옥수수수염차','광동 진한 헛개차','토닉워터'] },
+    { cat:'음료',   name:'주스',           spec:'400ml',     price:1800, skus:['델몬트 오렌지'] },
+    { cat:'음료',   name:'캔·컵커피',       spec:'175~275ml', price:2200, skus:['맥심 TOP 더블랙','맥심 TOP 스위트아메리카노','맥심 TOP 마스터라떼','레쓰비 마일드'] },
+    { cat:'음료',   name:'어린이 음료',      spec:'220~235ml', price:1500, skus:['뽀로로 딸기맛','뽀로로 밀크맛','뽀로로 보리차'] },
+    { cat:'즉석식품', name:'즉석밥',          spec:'200g',      price:2000, skus:['햇반 찰기가득 200g'] },
+    { cat:'즉석식품', name:'참치캔',          spec:'135g',      price:3500, skus:['참치 라이트스탠다드 135g','고추참치 135g'] },
+    { cat:'즉석식품', name:'캔햄',           spec:'200g',      price:5000, skus:['스팸클래식 200g'] },
+    { cat:'즉석식품', name:'캔김치',          spec:'160g',      price:4000, skus:['종가 맛김치 160g 캔'] },
+    { cat:'소스',   name:'장류·소스',       spec:'170~200g',  price:2000, skus:['사계절쌈장','태양초 우리쌀고추장','새콤달콤 초고추장','햇살담은 진간장'] },
+    { cat:'소스',   name:'조미료 (소용량)',   spec:'40~50g',    price:4500, skus:['고소함가득 참기름','허브솔트 오리지널','요리순후추'] },
+    { cat:'안주',   name:'육포',           spec:'30g',       price:3500, skus:['상상육포 오리지널','상상육포 비프앤치즈'] },
+    { cat:'기타',   name:'부탄가스',         spec:'220g',      price:2000, skus:['폭발방지 세이프부탄'] },
+    { cat:'기타',   name:'이소부탄',         spec:'230~450g',  price:6000, skus:['맥스캠핑 이소부탄 230g','맥스캠핑 이소부탄 450g'] },
+    { cat:'기타',   name:'숯',             spec:'700g',      price:5000, skus:['바베큐 참숯'] },
+  ]
+};
+
+// 소속 SKU의 규격에서 범위를 만든다 — '86g' / '105~120g' / 단위가 섞이면 나열
+function camp2Spec(members) {
+  const parsed = members.map(m => {
+    const mm = String(m.spec || '').trim().match(/^([\d.]+)\s*(.*)$/);
+    return mm ? { v: parseFloat(mm[1]), u: mm[2].trim() } : null;
+  }).filter(Boolean);
+  if (!parsed.length) return '';
+  const units = [...new Set(parsed.map(p => p.u))];
+  if (units.length !== 1) return [...new Set(members.map(m => m.spec))].join(' · ');
+  const vs = parsed.map(p => p.v), lo = Math.min(...vs), hi = Math.max(...vs);
+  return (lo === hi ? `${lo}` : `${lo}~${hi}`) + units[0];
+}
+
+/**
+ * 유형별 집계.
+ * 시트에 「유형」 열이 있으면 그것으로 묶고, 없으면 코드 내 예비 매핑을 쓴다.
+ * 판매가도 시트 「오더앤픽 판매가」가 있으면 그 평균, 없으면 예비값.
+ */
+function camp2TypeRows() {
+  const skus = (skuCmpData && skuCmpData.skus) || [];
+  const cs = skuCmpState, b = cs.b2bRate/100, u = cs.upRate/100;
+  const avg = a => a.length ? a.reduce((x,v)=>x+v,0)/a.length : null;
+  const enrich = x => Object.assign({}, x, { oldPrice: r10(x.supply * (1+b) * (1+u), cs.round) });
+
+  const fromSheet = skus.some(x => x.typeName);
+  let groups, orphans = [];
+
+  if (fromSheet) {
+    const order = [], map = {};
+    skus.forEach(x => {
+      const key = x.typeName || '미분류';
+      if (!map[key]) { map[key] = { cat: x.category, name: key, members: [], missing: [] }; order.push(key); }
+      map[key].members.push(enrich(x));
+    });
+    groups = order.map(k => map[k]);
+  } else {
+    const byName = {};
+    skus.forEach(x => { byName[x.name] = x; });
+    const used = new Set();
+    groups = camp2State.types.map(t => {
+      const members = t.skus.map(n => { const x = byName[n]; if (x) used.add(n); return x ? enrich(x) : null; }).filter(Boolean);
+      return { cat:t.cat, name:t.name, fbPrice:t.price, fbSpec:t.spec, members, missing: t.skus.filter(n => !byName[n]) };
+    });
+    orphans = skus.filter(x => !used.has(x.name)).map(x => x.name);
+  }
+
+  // 예비 판매가는 유형명으로 찾는다 (시트에 판매가가 아직 없을 때만 쓰인다)
+  const fb = {}; camp2State.types.forEach(t => { fb[t.name] = t.price; });
+
+  const rows = groups.map((g, idx) => {
+    const prices  = g.members.filter(m => m.opPrice != null).map(m => m.opPrice);
+    const sheetPrice = avg(prices);
+    return Object.assign({}, g, {
+      idx,
+      price      : sheetPrice != null ? Math.round(sheetPrice) : (g.fbPrice ?? fb[g.name] ?? null),
+      priceFrom  : sheetPrice != null ? 'sheet' : 'fallback',
+      priceMin   : prices.length ? Math.min(...prices) : null,
+      priceMax   : prices.length ? Math.max(...prices) : null,
+      priceFilled: prices.length,
+      spec       : camp2Spec(g.members) || g.fbSpec || '',
+      hanaro     : avg(g.members.filter(m=>m.hanaro!=null).map(m=>m.hanaro)),
+      cguide     : avg(g.members.filter(m=>m.cguide!=null).map(m=>m.cguide)),
+      oldPrice   : avg(g.members.map(m=>m.oldPrice))
+    });
+  });
+  return { rows, orphans, fromSheet };
+}
+
+// 판매가 1건을 분해한다 — 2단계는 납품 마진이 없어 구조가 단순하다
+function camp2Split(price) {
+  const s = camp2State;
+  const fee    = price * s.fee/100;   // 캠핏 수수료
+  const supply = price - fee;         // 공급가 = 캠핑장 정산액
+  const pg     = price * s.pg/100;
+  const camfit = fee - pg;            // 캠핏 순이익
+  return { price, fee, supply, pg, camfit };
+}
+
+const c2w  = n => Math.round(n).toLocaleString('ko-KR');
+const c2gap = (price, ref) => ref ? ((price/ref - 1) * 100) : null;
+// 큰 금액 보조 표기 — 만원/억원
+const c2man = n => {
+  const v = Math.abs(Math.round(n));
+  if (v >= 100000000) return (n/100000000).toFixed(2).replace(/\.?0+$/,'') + '억원';
+  if (v >= 10000)     return Math.round(n/10000).toLocaleString('ko-KR') + '만원';
+  return '';
+};
+
+// 월 규모를 분해한다 — 2단계는 납품 마진이 없어 수수료가 캠핏 수익의 전부다
+function camp2Scale() {
+  const s = camp2State;
+  const perCamp = s.avgSpend * s.resv * s.adopt/100;  // 캠핑장 1곳 월 거래액
+  const gmv     = perCamp * s.camps;                  // 전체 월 거래액
+  const fee     = gmv * s.fee/100;                    // 캠핏 수수료
+  const supply  = gmv - fee;                          // 공급가 = 캠핑장 정산액 합계
+  const pg      = gmv * s.pg/100;
+  const camfit  = fee - pg;                           // 캠핏 순이익
+  return { perCamp, gmv, fee, supply, pg, camfit };
+}
+
+function renderCamp2Calc() {
+  const s = camp2State;
+  const inp = (id, label, val, step, suffix, hint) => {
+    const money = suffix === '원';
+    const attrs = money ? `type="text" inputmode="numeric" value="${fmtNum(val)}"` : `type="number" step="${step}" value="${val}"`;
+    return `<div>
+       <label class="block text-xs text-gray-500 mb-1">${label}</label>
+       <div class="relative">
+         <input id="${id}" ${attrs} class="w-full border border-gray-300 rounded-lg pl-3 pr-10 py-2 text-sm${money?' tabular-nums':''}" />
+         <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">${suffix}</span>
+       </div>
+       ${hint ? `<div class="text-[11px] text-gray-400 mt-1">${hint}</div>` : ''}
+     </div>`;
+  };
+  return `
+    <section>
+      <div class="mb-5">
+        <div class="flex items-center gap-2 mb-1">
+          <h2 class="text-2xl font-bold text-gray-900">🏪 2단계 마진 계산기</h2>
+          <span class="text-[11px] font-semibold px-2 py-0.5 rounded" style="background:#ede9fe;color:#6d28d9;">캠핑장 매점 연동</span>
+        </div>
+        <p class="text-sm text-gray-500">캠핑장이 <b>이미 보유한 매점 재고</b>를 오더앤픽에서 판매합니다. 캠핏은 <b>납품 마진 없이 수수료만</b> 수취하므로, <b>거래액에서 수수료를 빼면 공급가(캠핑장 정산액)</b>가 됩니다.</p>
+        <p class="text-xs text-gray-500 mt-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">💡 <b>모든 금액은 VAT 포함 기준</b>입니다. · 온라인 판매가는 <b>캠핏이 결정</b>하며 기준은 <b>하나로마트 대비</b>입니다 — 품목별 가격 화면 참조.</p>
+      </div>
+
+      <div class="bg-white rounded-xl border border-gray-200 p-5 mb-5">
+        <h3 class="font-bold text-gray-900 mb-3">입력 <span class="text-xs font-normal text-gray-400">— 요율은 품목별 가격 화면과 공유됩니다</span></h3>
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+          ${inp('c2Fee','캠핏 수수료율', s.fee, 0.5, '%', `손익분기 = PG율 ${s.pg}%`)}
+          ${inp('c2Pg','PG 수수료율', s.pg, 0.1, '%', '캠핏 부담')}
+          ${inp('c2Camps','캠핑장 수', s.camps, 1, '개', '')}
+          ${inp('c2Spend','캠퍼 평균 주문금액', s.avgSpend, 1000, '원', '1건당')}
+          ${inp('c2Resv','캠핑장 월 평균 예약건수', s.resv, 10, '건', '캠핑장 1곳 기준')}
+          ${inp('c2Adopt','오더앤픽 이용률', s.adopt, 1, '%', '예약 중 주문 비율')}
+        </div>
+      </div>
+
+      <div id="camp2Body"></div>
+    </section>
+  `;
+}
+
+function attachCamp2CalcHandlers() {
+  const map = { c2Fee:'fee', c2Pg:'pg', c2Camps:'camps', c2Spend:'avgSpend', c2Resv:'resv', c2Adopt:'adopt' };
+  const sync = () => {
+    Object.entries(map).forEach(([k,v]) => {
+      const el = document.getElementById(k);
+      if (el) camp2State[v] = parseNum(el.value);
+    });
+    updateCamp2Calc();
+  };
+  Object.keys(map).forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', sync);
+  });
+  attachNumFormat(['c2Spend']);
+  sync();
+}
+
+function updateCamp2Calc() {
+  const s = camp2State;
+  const box = document.getElementById('camp2Body');
+  if (!box) return;
+  const r = camp2Scale();
+  const max = Math.max(r.gmv, 1);
+
+  const card = (label, val, sub, color) => `
+    <div class="bg-white rounded-xl border border-gray-200 p-4">
+      <div class="text-xs text-gray-500 mb-1">${label}</div>
+      <div class="text-2xl font-bold tabular-nums leading-tight" style="color:${color}">${c2w(val)}<span class="text-sm font-normal text-gray-400 ml-1">원</span></div>
+      <div class="text-[11px] text-gray-400 mt-1">${c2man(val) ? `<b class="text-gray-500">${c2man(val)}</b> · ` : ''}${sub}</div>
+    </div>`;
+
+  const bar = (label, val, color, note) => `
+    <div class="mb-3">
+      <div class="flex justify-between text-xs mb-1">
+        <span class="text-gray-600">${label}</span>
+        <span class="tabular-nums font-semibold" style="color:${color}">${c2w(val)}원 <span class="text-gray-400 font-normal">${(val/max*100).toFixed(1)}%</span></span>
+      </div>
+      <div class="h-2 bg-gray-100 rounded-full overflow-hidden">
+        <div class="h-full rounded-full" style="width:${Math.max(0,Math.min(100,val/max*100))}%;background:${color}"></div>
+      </div>
+      ${note ? `<div class="text-[11px] text-gray-400 mt-1">${note}</div>` : ''}
+    </div>`;
+
+  const row = (label, val, color, bold) => `
+    <div class="flex justify-between items-baseline py-2 ${bold?'border-t border-gray-100 mt-1 pt-3':''}">
+      <span class="text-sm ${bold?'font-semibold text-gray-700':'text-gray-600'}">${label}</span>
+      <span class="${bold?'text-lg':'text-sm'} font-bold tabular-nums" style="color:${color}">${c2w(val)}<span class="text-xs font-normal text-gray-400 ml-0.5">원</span></span>
+    </div>`;
+
+  const warn = [];
+  if (s.fee <= s.pg) warn.push(`캠핏 순이익이 <b>마이너스</b>입니다. 수수료율(${s.fee}%)이 PG율(${s.pg}%) 이하입니다.`);
+  if (s.adopt > 100) warn.push(`오더앤픽 이용률이 <b>100%를 넘습니다.</b>`);
+  if (r.gmv <= 0) warn.push(`거래액이 <b>0</b>입니다. 입력값을 확인해주세요.`);
+
+  box.innerHTML = `
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+      ${card('월 거래액 (전체)', r.gmv, '캠퍼 결제금액 합계', '#1d4ed8')}
+      ${card('공급가 (캠핑장 정산액)', r.supply, `거래액 − 수수료 ${s.fee}%`, '#c2410c')}
+      ${card('캠핏 수수료', r.fee, `거래액 × ${s.fee}%`, '#6d28d9')}
+      ${card('캠핏 순이익 (월)', r.camfit, `수수료 − PG ${s.pg}%`, r.camfit >= 0 ? '#1f6d4a' : '#dc2626')}
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-5">
+      <div class="bg-white rounded-xl border border-gray-200 p-5">
+        <h3 class="font-bold text-gray-900 mb-1">캠핑장 1곳 기준 <span class="text-xs font-normal text-gray-400">— 월</span></h3>
+        <p class="text-[11px] text-gray-400 mb-3">${fmtNum(s.avgSpend)}원 × ${fmtNum(s.resv)}건 × 이용률 ${s.adopt}%</p>
+        ${row('거래액', r.perCamp, '#1d4ed8')}
+        ${row(`캠핏 수수료 (${s.fee}%)`, r.perCamp * s.fee/100, '#6d28d9')}
+        ${row('공급가 — 캠핑장이 받는 돈', r.perCamp * (1 - s.fee/100), '#c2410c', true)}
+        <div class="mt-3 pt-3 border-t border-gray-100 text-xs text-gray-500">
+          캠핑장 매입원가는 캠핏이 알 수 없어 <b>캠핑장 마진은 계산되지 않습니다.</b>
+          매점 재고를 파는 구조이므로 <b>추가 사입 없이</b> 발생하는 매출입니다.
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl border border-gray-200 p-5">
+        <h3 class="font-bold text-gray-900 mb-1">전체 규모 <span class="text-xs font-normal text-gray-400">— 캠핑장 ${fmtNum(s.camps)}곳</span></h3>
+        <p class="text-[11px] text-gray-400 mb-3">캠핏 수익은 <b>수수료뿐</b>입니다 (납품 마진 없음)</p>
+        ${row('월 거래액', r.gmv, '#1d4ed8')}
+        ${row(`캠핏 수수료 (${s.fee}%)`, r.fee, '#6d28d9')}
+        ${row(`PG 수수료 (${s.pg}%)`, -r.pg, '#94a3b8')}
+        ${row('캠핏 순이익 (월)', r.camfit, r.camfit >= 0 ? '#1f6d4a' : '#dc2626', true)}
+        <div class="mt-3 pt-3 border-t border-gray-100 flex justify-between items-baseline">
+          <span class="text-sm font-semibold text-gray-700">캠핏 순이익 (연)</span>
+          <span class="text-xl font-bold tabular-nums" style="color:${r.camfit >= 0 ? '#1f6d4a' : '#dc2626'}">${c2w(r.camfit*12)}<span class="text-xs font-normal text-gray-400 ml-0.5">원</span></span>
+        </div>
+        <div class="text-[11px] text-gray-400 text-right">${c2man(r.camfit*12)}</div>
+      </div>
+    </div>
+
+    <div class="mt-5 bg-white rounded-xl border border-gray-200 p-5">
+      <h3 class="font-bold text-gray-900 mb-3">월 거래액 분해 <span class="text-xs font-normal text-gray-400">— ${c2w(r.gmv)}원</span></h3>
+      ${bar('공급가 (캠핑장이 받는 돈)', r.supply, '#c2410c', '')}
+      ${bar('PG 수수료', r.pg, '#94a3b8', '캠핏이 부담합니다')}
+      ${bar('캠핏 순이익', r.camfit, r.camfit >= 0 ? '#1f6d4a' : '#dc2626', '')}
+      <div class="mt-2 pt-3 border-t border-gray-100 text-xs text-gray-500">
+        캠핏 수수료 <b class="tabular-nums">${c2w(r.fee)}원</b> 안에 <b>PG ${c2w(r.pg)}원</b>과 <b>캠핏 순이익 ${c2w(r.camfit)}원</b>이 함께 들어 있습니다.
+        <br>손익분기 수수료율 = <b>PG율 ${s.pg}%</b> — 현재 <b>${s.fee}%</b> ${s.fee > s.pg ? '✅ 흑자' : '❌ 적자'}
+        · 거래액 대비 캠핏 순이익률 <b>${r.gmv>0 ? (r.camfit/r.gmv*100).toFixed(2) : '0.00'}%</b>
+      </div>
+    </div>
+
+    ${warn.length ? `<div class="mt-5 bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900">
+      ${warn.map(w => `<div class="flex gap-2 mb-1"><span>⚠️</span><span>${w}</span></div>`).join('')}
+    </div>` : ''}
+
+    <div class="mt-5 bg-violet-50 border border-violet-200 rounded-xl p-4 text-xs text-violet-900">
+      <b>2단계가 1단계와 다른 점</b> — 캠핑장이 <b>이미 보유한 재고</b>를 파는 구조라 <b>캠핏 납품 마진이 없습니다.</b>
+      1단계는 납품 마진 + 서비스 이용료 두 곳에서 수익이 나지만, 2단계는 <b>수수료가 전부</b>입니다.
+      대신 캠핑장은 <b>초기 사입 없이</b> 시작할 수 있습니다.
+    </div>
+  `;
+}
+
+function renderCamp2Price() {
+  const s = camp2State;
+  return `
+    <section>
+      <div class="mb-5">
+        <div class="flex items-center gap-2 mb-1">
+          <h2 class="text-2xl font-bold text-gray-900">🏷 품목별 가격</h2>
+          <span class="text-[11px] font-semibold px-2 py-0.5 rounded" style="background:#ede9fe;color:#6d28d9;">캠핑장 매점 연동</span>
+        </div>
+        <p class="text-sm text-gray-500">캠핑장마다 매점 상품이 다르므로 <b>개별 SKU가 아니라 유형별 표준가</b>로 관리합니다. 바코드만 받아 등록할 때 유형에 따라 판매가가 자동으로 붙습니다.</p>
+        <p class="text-xs text-gray-500 mt-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">💡 <b>모든 값은 구글 시트에서 옵니다</b> — 유형·판매가·비교가격 전부. 화면에서 편집하지 않습니다. · <b>유형을 클릭하면</b> 어떤 상품이 묶여 있는지 펼쳐집니다.</p>
+      </div>
+
+      <div class="bg-white rounded-xl border border-gray-200 p-5 mb-5">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">캠핏 수수료율</label>
+            <div class="relative">
+              <input id="c2pFee" type="number" step="0.5" value="${s.fee}" class="w-full border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm" />
+              <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">%</span>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">PG 수수료율</label>
+            <div class="relative">
+              <input id="c2pPg" type="number" step="0.1" value="${s.pg}" class="w-full border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm" />
+              <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">%</span>
+            </div>
+          </div>
+          <div class="col-span-2 flex items-end">
+            <div id="c2pSummary" class="text-xs text-gray-500"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="camp2PriceBody"></div>
+    </section>
+  `;
+}
+
+function attachCamp2PriceHandlers() {
+  loadSkuCompare();
+  const sync = () => {
+    const f = document.getElementById('c2pFee');
+    const p = document.getElementById('c2pPg');
+    if (f) camp2State.fee = parseNum(f.value);
+    if (p) camp2State.pg  = parseNum(p.value);
+    updateCamp2Price();
+  };
+  ['c2pFee','c2pPg'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', sync);
+  });
+  sync();
+}
+
+function updateCamp2Price() {
+  const s = camp2State;
+  const box = document.getElementById('camp2PriceBody');
+  if (!box) return;
+
+  if (!skuCmpData) {
+    box.innerHTML = skuCmpError
+      ? `<div class="bg-red-50 border border-red-200 rounded-xl p-6"><p class="font-bold text-red-900 mb-1">60종 시트를 불러오지 못했습니다</p><p class="text-sm text-red-800 font-mono">${skuCmpError}</p></div>`
+      : `<div class="bg-white border border-gray-200 rounded-xl p-10 text-center text-sm text-gray-400">60종 시트를 불러오는 중입니다…</div>`;
+    return;
+  }
+
+  const { rows: T, orphans, fromSheet } = camp2TypeRows();
+  const cats = [...new Set(T.map(t => t.cat))];
+  const catColor = { '라면':'#dc2626','제과':'#d97706','음료':'#0284c7','즉석식품':'#7c3aed','소스':'#059669','안주':'#be185d','기타':'#64748b' };
+  const pct = (v, good) => v === null ? '<span class="text-gray-300">—</span>'
+    : `<span style="color:${v >= 0 ? (good ? '#1f6d4a' : '#c2410c') : (good ? '#dc2626' : '#1f6d4a')}">${v >= 0 ? '+' : ''}${v.toFixed(0)}%</span>`;
+  const num = v => v == null ? '<span class="text-gray-300">—</span>' : c2w(v);
+
+  let rows = '';
+  cats.forEach(cat => {
+    rows += `<tr class="bg-gray-50"><td colspan="9" class="px-4 py-2 text-xs font-bold" style="color:${catColor[cat]||'#374151'}">${cat}</td></tr>`;
+    T.filter(t => t.cat === cat).forEach(t => {
+      const has = t.price != null;
+      const r = camp2Split(t.price || 0);
+      // 둘 다 소비자가 비교 — 캠퍼가 실제로 견주는 대상이다
+      const hnGap = has ? c2gap(t.price, t.hanaro) : null;
+      const cgGap = has ? c2gap(t.price, t.cguide) : null;
+      const oldGap = (has && t.oldPrice) ? (t.price / t.oldPrice - 1) * 100 : null;
+      const isOpen = !!s.open[t.idx];
+      const spread = t.priceMin != null && t.priceMin !== t.priceMax;
+      const isEtc = t.name === '미분류';
+
+      rows += `
+        <tr class="border-t border-gray-100 hover:bg-violet-50/40${isEtc?' bg-amber-50/50':''}">
+          <td class="px-4 py-2.5">
+            <button data-c2open="${t.idx}" class="flex items-center gap-1.5 text-left group">
+              <span class="text-gray-400 text-xs w-3 inline-block transition-transform" style="transform:rotate(${isOpen?90:0}deg)">▶</span>
+              <span>
+                <span class="text-sm font-semibold ${isEtc?'text-amber-800':'text-gray-900'} group-hover:text-violet-700">${isEtc?'⚠️ ':''}${t.name}</span>
+                <span class="text-[11px] text-gray-400 ml-1">${t.spec}${t.spec?' · ':''}${t.members.length}종</span>
+              </span>
+            </button>
+          </td>
+          <td class="px-3 py-2.5 text-right">
+            ${has ? `<div class="text-sm font-bold tabular-nums ${t.priceFrom==='sheet'?'text-blue-700':'text-gray-400'}">${c2w(t.price)}</div>
+              ${spread ? `<div class="text-[10px] text-gray-400 tabular-nums">${c2w(t.priceMin)}~${c2w(t.priceMax)}</div>` : ''}
+              ${t.priceFrom==='fallback' ? `<div class="text-[10px] text-amber-600">기본값</div>` : (t.priceFilled < t.members.length ? `<div class="text-[10px] text-amber-600">${t.priceFilled}/${t.members.length}종</div>` : '')}`
+              : '<span class="text-gray-300">—</span>'}
+          </td>
+          <td class="px-3 py-2.5 text-right text-sm font-bold tabular-nums" style="color:#c2410c">${has ? c2w(r.supply) : '<span class="text-gray-300">—</span>'}</td>
+          <td class="px-3 py-2.5 text-right text-sm tabular-nums" style="color:#6d28d9">${has ? c2w(r.fee) : '<span class="text-gray-300">—</span>'}</td>
+          <td class="px-3 py-2.5 text-right text-sm tabular-nums text-gray-500">${num(t.hanaro)}</td>
+          <td class="px-3 py-2.5 text-right text-sm font-semibold tabular-nums">${pct(hnGap, false)}</td>
+          <td class="px-3 py-2.5 text-right text-sm tabular-nums text-gray-500">${num(t.cguide)}</td>
+          <td class="px-3 py-2.5 text-right text-sm font-semibold tabular-nums">${pct(cgGap, false)}</td>
+          <td class="px-3 py-2.5 text-right text-sm tabular-nums text-gray-400">${num(t.oldPrice)}${oldGap!==null?`<div class="text-[10px] ${oldGap>=0?'text-orange-500':'text-emerald-600'}">${oldGap>=0?'+':''}${oldGap.toFixed(0)}%</div>`:''}</td>
+        </tr>`;
+
+      if (isOpen) {
+        t.members.forEach(m => {
+          const mp = m.opPrice != null ? m.opPrice : t.price;      // SKU 판매가 없으면 유형가
+          const own = m.opPrice != null;
+          const mr = mp != null ? camp2Split(mp) : null;
+          rows += `
+            <tr class="bg-violet-50/30 text-xs">
+              <td class="pl-12 pr-4 py-1.5">
+                <span class="text-gray-700">${m.name}</span>
+                <span class="text-gray-400 ml-1">${m.spec}</span>
+              </td>
+              <td class="px-3 py-1.5 text-right tabular-nums ${own?'text-blue-700 font-semibold':'text-gray-400'}">${mp!=null?c2w(mp):'—'}${own?'':'<span class="text-[10px] ml-0.5">↑</span>'}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums text-gray-500">${mr?c2w(mr.supply):'—'}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums text-gray-500">${mr?c2w(mr.fee):'—'}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums text-gray-600">${num(m.hanaro)}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums font-semibold">${pct(mp!=null?c2gap(mp,m.hanaro):null, false)}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums text-gray-600">${num(m.cguide)}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums font-semibold">${pct(mp!=null?c2gap(mp,m.cguide):null, false)}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums text-gray-400">${num(m.oldPrice)}</td>
+            </tr>`;
+        });
+        if (t.missing && t.missing.length) {
+          rows += `<tr class="bg-amber-50 text-xs"><td colspan="9" class="pl-12 pr-4 py-1.5 text-amber-800">⚠️ 시트에서 못 찾은 상품: ${t.missing.join(' · ')}</td></tr>`;
+        }
+      }
+    });
+  });
+
+  const withHn = T.filter(t => t.hanaro && t.price != null);
+  const avgHn = withHn.length ? withHn.reduce((a,t) => a + c2gap(t.price, t.hanaro), 0) / withHn.length : 0;
+  const withCg = T.filter(t => t.cguide && t.price != null);
+  const avgCg = withCg.length ? withCg.reduce((a,t) => a + c2gap(t.price, t.cguide), 0) / withCg.length : 0;
+  const sum = document.getElementById('c2pSummary');
+  if (sum) sum.innerHTML = `유형 <b>${T.length}종</b> · SKU <b>${T.reduce((a,t)=>a+t.members.length,0)}종</b>`
+    + ` · 유형 출처 <b class="${fromSheet?'text-blue-700':'text-amber-600'}">${fromSheet?'시트':'기본값'}</b>`
+    + ` · 하나로 평균 <b style="color:${avgHn>=0?'#c2410c':'#1f6d4a'}">${avgHn>=0?'+':''}${avgHn.toFixed(0)}%</b>`
+    + (withCg.length
+        ? ` · 씨스 가이드가 평균 <b style="color:${avgCg>=0?'#c2410c':'#1f6d4a'}">${avgCg>=0?'+':''}${avgCg.toFixed(0)}%</b>`
+        : ` · <b class="text-amber-600">씨스 가이드가 미입력</b>`);
+
+  box.innerHTML = `
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full min-w-[1040px]">
+          <thead class="bg-gray-100 text-xs text-gray-600">
+            <tr>
+              <th class="px-4 py-3 text-left font-semibold">유형 <span class="font-normal text-gray-400">클릭 시 상세</span></th>
+              <th class="px-3 py-3 text-right font-semibold" style="color:#1d4ed8">오더앤픽<br>판매가</th>
+              <th class="px-3 py-3 text-right font-semibold" style="color:#c2410c">공급가<br><span class="font-normal">(정산액)</span></th>
+              <th class="px-3 py-3 text-right font-semibold" style="color:#6d28d9">캠핏<br>수수료</th>
+              <th class="px-3 py-3 text-right font-semibold">하나로마트<br><span class="font-normal text-gray-400">소비자가</span></th>
+              <th class="px-3 py-3 text-right font-semibold">격차</th>
+              <th class="px-3 py-3 text-right font-semibold">씨스페이스<br><span class="font-normal text-gray-400">가이드가</span></th>
+              <th class="px-3 py-3 text-right font-semibold">격차</th>
+              <th class="px-3 py-3 text-right font-semibold">기존<br>오더앤픽가</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    ${orphans.length ? `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-xs text-amber-900">
+      ⚠️ <b>어느 유형에도 속하지 않은 SKU ${orphans.length}종</b> — ${orphans.join(' · ')}
+    </div>` : ''}
+
+    ${(fromSheet && withCg.length) ? '' : `<div class="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-xs text-amber-900 space-y-1.5">
+      <div class="font-bold">시트에 아직 없는 열이 있습니다 — <code class="bg-white px-1 rounded">초기 SKU(연동용)</code> 탭 2행에 헤더를 추가하세요</div>
+      ${withCg.length ? '' : `<div>· <b>「씨스페이스 가이드가」</b> — 편의점 소비자가. RAW 시트 <b>Q열</b> 참조</div>`}
+      ${fromSheet ? '' : `<div>· <b>「유형」</b> — 유형명(예: 컵라면 (대)). 넣으면 화면이 시트를 따라갑니다</div>
+      <div>· <b>「오더앤픽 판매가」</b> — 유형별 표준가 탭을 만들고 <code class="bg-white px-1 rounded">=VLOOKUP($O2,'유형별 표준가'!$A:$B,2,0)</code>로 끌어오면 23행만 관리하면 됩니다</div>`}
+      <div class="text-amber-700 pt-1">열 위치는 자유입니다 — GAS가 <b>헤더 문구</b>로 찾습니다. 추가 후 <b>GAS 재배포</b>가 필요합니다.</div>
+    </div>`}
+
+    <div class="mt-4 text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-1.5">
+      <div><b class="text-blue-700">오더앤픽 판매가</b> — 시트 「오더앤픽 판매가」의 <b>유형 평균</b>입니다. 유형 안에서 값이 다르면 아래에 <b>최소~최대 범위</b>가 함께 표시되며, 범위가 넓으면 그 유형을 쪼개야 한다는 신호입니다. 회색은 시트에 없어 <b>코드 기본값</b>을 쓴 것입니다.</div>
+      <div><b style="color:#c2410c">공급가</b> — 캠핑장이 실제로 받는 금액입니다. 판매가에서 캠핏 수수료 ${s.fee}%를 뺀 값입니다.</div>
+      <div><b>하나로마트 · 씨스페이스 가이드가</b> — 둘 다 <b>소비자 판매가</b>입니다. 캠퍼가 실제로 견주는 대상이라 <b>오더앤픽 판매가와 직접 비교</b>합니다.
+        <span class="text-gray-400">씨스페이스 공급가(편의점 납품가)는 1단계 납품가 비교용이라 이 화면에서는 쓰지 않습니다.</span></div>
+      <div><b>기존 오더앤픽가</b> — 1단계(사입형) 산식으로 계산한 값입니다. 공급가 × ${(1+skuCmpState.b2bRate/100).toFixed(2)} × ${(1+skuCmpState.upRate/100).toFixed(2)} · 10원 처리. 2단계 판매가를 여기에 맞출지 판단할 때 씁니다.</div>
+    </div>
+  `;
+
+  box.querySelectorAll('button[data-c2open]').forEach(el => {
+    el.addEventListener('click', () => {
+      const i = +el.dataset.c2open;
+      camp2State.open[i] = !camp2State.open[i];
+      updateCamp2Price();
+    });
+  });
+
+}
+
+// 숫자 입력칸 위에서 스크롤하면 값이 조용히 바뀌는 것을 막는다
+// (요율칸을 지나가며 스크롤하다 값이 틀어지면 알아채기 어렵다)
+document.addEventListener('wheel', () => {
+  const el = document.activeElement;
+  if (el && el.tagName === 'INPUT' && el.type === 'number') el.blur();
+}, { passive: true });
 
 // ===== 네비 이벤트 =====
 document.querySelectorAll('.nav-item').forEach(item => {
